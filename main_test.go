@@ -419,7 +419,7 @@ func TestSyncIndexFailureWarnsNotFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog(), nil); err != nil {
 		t.Fatalf("sync failed despite index-only fault: %v", err)
 	}
 	// the mail itself must still be archived

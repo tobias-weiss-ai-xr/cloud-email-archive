@@ -57,16 +57,45 @@ Paths can be overridden in the TOML or via `-config FILE`;
 ## Usage
 
 ```sh
-cloud-email-archive sync    [-account NAME]         # fetch IMAP + encrypt (incremental)
+cloud-email-archive sync    [-account NAME] [-before YYYY-MM-DD]  # fetch IMAP + encrypt (incremental)
 cloud-email-archive list    [-account NAME] [-limit 20]
 cloud-email-archive search  [-account NAME] TERM    # full-text search over decoded mail text
 cloud-email-archive search  [-account NAME] -raw TERM  # exact-byte scan over raw mail bytes
 cloud-email-archive index                           # build/update the search index (sync does this too)
 cloud-email-archive extract [-dir OUT] [-account NAME]   # write decrypted .eml files
+cloud-email-archive expire  [-account NAME] -before YYYY-MM-DD [-do]  # free server space
 cloud-email-archive verify  [-account NAME]         # decrypt + hash-check every blob
 cloud-email-archive keygen  [-output FILE]
 cloud-email-archive version                         # print version
 ```
+
+## Freeing server space
+
+The archive never deletes — but the mail server can, once the archive
+provably holds the mail. The typical yearly cleanup:
+
+```sh
+cloud-email-archive sync -before 2025-01-01     # 1. archive last year's mail (only that)
+cloud-email-archive verify                      # 2. prove every blob decrypts
+cloud-email-archive expire -before 2025-01-01   # 3. dry run: shows exactly what would go
+cloud-email-archive expire -before 2025-01-01 -do   # 4. delete those on the server
+```
+
+`expire` deletes on the server, never in the archive. It only ever touches a
+message when *all* of this holds:
+
+- the message's INTERNALDATE is before the cutoff (server-side `SEARCH
+  BEFORE` intersected with the folder's remembered archive state),
+- the folder's UIDVALIDITY matches the last sync (a changed UIDVALIDITY
+  skips the folder — stale UIDs could point at different messages),
+- a blob holding the *exact* message content exists in the archive and
+  decrypts to the same SHA-256. Anything unproven is skipped with a warning.
+
+Without `-do` the command is a dry run. Without `-before` it refuses to run.
+Deletion is UID-scoped (`UID STORE \Deleted` + `UID EXPUNGE`), so it touches
+exactly the proven set and nothing else. `sync` afterwards is a clean no-op:
+the remaining server mail is already in the archive, and the archive keeps
+everything — including what was just deleted server-side.
 
 ## Search speed
 

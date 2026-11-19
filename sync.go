@@ -13,7 +13,9 @@ import (
 	"log/slog"
 	"net"
 	"os/exec"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -62,7 +64,7 @@ type syncStats struct {
 // every failure so a cron-driven sync can alert. Note: go-imap v2 beta has no
 // context-aware operations, so there is deliberately no ctx parameter — a
 // hung connection is bounded by the server's TCP timeouts.
-func syncAccount(cfg *Config, a *Account, arc *Archive, st *State, log *slog.Logger) (syncStats, error) {
+func syncAccount(cfg *Config, a *Account, arc *Archive, st *State, log *slog.Logger, before *time.Time) (syncStats, error) {
 	pw, err := accountPassword(a)
 	if err != nil {
 		return syncStats{}, err
@@ -87,7 +89,7 @@ func syncAccount(cfg *Config, a *Account, arc *Archive, st *State, log *slog.Log
 	var errs []error
 	var total syncStats
 	for _, folder := range folders {
-		s, err := syncFolder(c, a, folder, arc, st, log)
+		s, err := syncFolder(c, a, folder, arc, st, log, before)
 		total.add(s)
 		if err != nil {
 			log.Error("folder sync failed", "account", a.Name, "folder", folder, "err", err)
@@ -164,7 +166,7 @@ func selectFolders(c *imapclient.Client, a *Account, log *slog.Logger) (found, m
 	return found, missing, nil
 }
 
-func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, st *State, log *slog.Logger) (syncStats, error) {
+func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, st *State, log *slog.Logger, before *time.Time) (syncStats, error) {
 	sel, err := c.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait()
 	if err != nil {
 		return syncStats{}, fmt.Errorf("select %q: %w", folder, err)
@@ -177,9 +179,17 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 	}
 	fs.UIDValidity = sel.UIDValidity
 
-	present, err := enumerateUIDs(c, sel.NumMessages)
-	if err != nil {
-		return syncStats{}, fmt.Errorf("enumerate %q: %w", folder, err)
+	var present []imap.UID
+	if before != nil {
+		present, err = searchUIDsBefore(c, *before)
+		if err != nil {
+			return syncStats{}, fmt.Errorf("search before %s: %w", before.Format("2006-01-02"), err)
+		}
+	} else {
+		present, err = enumerateUIDs(c, sel.NumMessages)
+		if err != nil {
+			return syncStats{}, fmt.Errorf("enumerate %q: %w", folder, err)
+		}
 	}
 
 	have := make(map[uint32]bool, len(fs.UIDs))
@@ -207,6 +217,28 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 }
 
 // enumerateUIDs returns all message UIDs currently in the selected mailbox.
+// searchUIDsBefore returns the UIDs of all messages whose INTERNALDATE is
+// before cutoff (server-side UID SEARCH BEFORE — date-only, exclusive). This
+// is the date-scoped alternative to enumerateUIDs for "archive old mail".
+//
+// Honest gap: the error paths (tagged NO, non-UID search reply) are not
+// injectable through the test session hook — Session.Search's NumKind
+// parameter lives in go-imap's internal imapwire package, unnameable outside
+// the library. Both branches are plain error propagation.
+func searchUIDsBefore(c *imapclient.Client, cutoff time.Time) ([]imap.UID, error) {
+	data, err := c.UIDSearch(&imap.SearchCriteria{Before: cutoff}, nil).Wait()
+	if err != nil {
+		return nil, err
+	}
+	set, ok := data.All.(imap.UIDSet)
+	if !ok {
+		return nil, fmt.Errorf("search returned no UID set (%T)", data.All)
+	}
+	uids, _ := set.Nums()
+	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+	return uids, nil
+}
+
 func enumerateUIDs(c *imapclient.Client, numMessages uint32) ([]imap.UID, error) {
 	if numMessages == 0 {
 		return nil, nil

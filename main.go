@@ -28,6 +28,8 @@ Commands:
   search TERM         full-text search over archived messages (--raw for byte scan)
   extract             write decrypted messages as .eml into a directory
   verify              decrypt-check every blob in the archive
+  expire              delete server-side mail the archive provably holds
+                      (dry run unless -do; requires -before YYYY-MM-DD)
   version
 
 Config:  $CLOUD_EMAIL_ARCHIVE_CONFIG or ~/.config/cloud-email-archive/config.toml
@@ -61,6 +63,8 @@ func run(args []string) int {
 		err = cmdSearch(args[1:])
 	case "extract":
 		err = cmdExtract(args[1:])
+	case "expire":
+		err = cmdExpire(args[1:], slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	case "verify":
 		err = cmdVerify(args[1:])
 	case "version":
@@ -116,9 +120,18 @@ func loadCfgEnv(fs *flag.FlagSet, args []string) (*cmdEnv, error) {
 
 func cmdSync(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	beforeStr := fs.String("before", "", "only fetch mail received before this date (YYYY-MM-DD, exclusive); a later sync without -before picks up the rest")
 	env, err := loadCfgEnv(fs, args)
 	if err != nil {
 		return err
+	}
+	var before *time.Time
+	if *beforeStr != "" {
+		t, err := parseDateArg(*beforeStr)
+		if err != nil {
+			return fmt.Errorf("-before: %w", err)
+		}
+		before = &t
 	}
 	cfg, arc := env.cfg, env.arc
 	if env.account != "" {
@@ -148,7 +161,7 @@ func cmdSync(args []string, log *slog.Logger) error {
 	var errs []error
 	var total syncStats
 	for i := range cfg.Accounts {
-		s, err := syncAccount(cfg, &cfg.Accounts[i], arc, st, log)
+		s, err := syncAccount(cfg, &cfg.Accounts[i], arc, st, log, before)
 		total.add(s)
 		if err != nil {
 			log.Error("sync failed", "account", cfg.Accounts[i].Name, "err", err)

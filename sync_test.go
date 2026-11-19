@@ -249,7 +249,7 @@ func TestSelectFoldersSemantics(t *testing.T) {
 func TestSyncAccountNoPassword(t *testing.T) {
 	a := &Account{Name: "nopw", Host: "127.0.0.1", Port: 1, Security: "none"}
 	_, err := syncAccount(&Config{ArchiveDir: t.TempDir()}, a, newArchive(t.TempDir(), testID(t)),
-		&State{Accounts: map[string]map[string]*FolderState{}}, quietLog())
+		&State{Accounts: map[string]map[string]*FolderState{}}, quietLog(), nil)
 	if err == nil || !strings.Contains(err.Error(), "neither password nor password_cmd") {
 		t.Fatalf("err = %v, want credential error", err)
 	}
