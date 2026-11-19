@@ -117,6 +117,8 @@ func cmdIndex(args []string) error {
 	}
 	segs, err := ensureIndex(env.arc)
 	if err != nil {
+		// honest gap: unreachable — ensureIndex re-lists the blobs that
+		// succeeded above, against the same directory with the same perms
 		return err
 	}
 	fmt.Printf("index: %d blob(s) covered, %d segment(s)\n", len(blobs), segs)

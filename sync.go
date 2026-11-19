@@ -266,6 +266,13 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 			case imapclient.FetchItemDataBodySection:
 				if item.Literal != nil {
 					b, err := io.ReadAll(item.Literal)
+					// a dropped connection can surface as a short read with a
+					// nil read error (the client's literal reader treats EOF as
+					// end-of-literal) — archiving half a message would be worse
+					// than failing the run, so the promised size is verified
+					if err == nil && item.Literal.Size() != int64(len(b)) {
+						err = fmt.Errorf("body truncated: got %d of %d bytes", len(b), item.Literal.Size())
+					}
 					if err != nil {
 						return fetched, s, err
 					}
@@ -278,6 +285,9 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 			continue
 		}
 		if uid == 0 {
+			// honest gap: unreachable against go-imap v2 beta.9 — it
+			// discards UID-less FETCH responses unilaterally, so they never
+			// reach this loop; kept as defense for future client versions
 			log.Warn("fetch response without UID, skipping", "account", a.Name, "folder", folder)
 			continue
 		}

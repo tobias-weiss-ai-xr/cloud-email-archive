@@ -663,3 +663,145 @@ func TestWriteNewKeyMkdirError(t *testing.T) {
 		t.Fatal("writeNewKey through file-as-parent succeeded")
 	}
 }
+
+// put's finalization branches: tmp.Close failure aborts without a partial
+// blob. The seam writer's Close closes the underlying tmp first, so put's
+// own tmp.Close hits "file already closed".
+func TestPutTmpCloseFault(t *testing.T) {
+	quietLog()
+	env := newTestEnv(t)
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	} // warm-up: archive dir exists
+	env.arc.newWriter = func(w io.Writer, r ...age.Recipient) (io.WriteCloser, error) {
+		inner, err := age.Encrypt(w, r...)
+		if err != nil {
+			return nil, err
+		}
+		return &sideClose{WriteCloser: inner, side: func() {
+			w.(*os.File).Close() //nolint:errcheck — the fault
+		}}, nil
+	}
+	if _, err := env.arc.put("acc", []byte("Subject: two\r\n\r\nbeta")); err == nil {
+		t.Fatal("tmp.Close failure silently accepted")
+	}
+	assertBlobCount(t, env.arc, 1) // the warm-up blob, nothing partial
+}
+
+// Chmod failure (e.g. tmp vanished before the permission fix on exotic
+// filesystems): the writer's Close removes the tmp path; the still-open fd
+// makes put's tmp.Close succeed, then Chmod hits ENOENT.
+func TestPutChmodFault(t *testing.T) {
+	quietLog()
+	env := newTestEnv(t)
+	env.arc.newWriter = func(w io.Writer, r ...age.Recipient) (io.WriteCloser, error) {
+		inner, err := age.Encrypt(w, r...)
+		if err != nil {
+			return nil, err
+		}
+		return &sideClose{WriteCloser: inner, side: func() {
+			os.Remove(w.(*os.File).Name()) //nolint:errcheck — the fault
+		}}, nil
+	}
+	if _, err := env.arc.put("acc", []byte("Subject: two\r\n\r\nbeta")); err == nil {
+		t.Fatal("Chmod failure silently accepted")
+	}
+	assertBlobCount(t, env.arc, 0)
+}
+
+// Rename failure with the tmp file intact (dir permissions flipped under the
+// write, e.g. a concurrent admin action on a share): put must surface the
+// error and leave no blob — and sweepStaleTmp must clean the orphan tmp up.
+func TestPutRenameFault(t *testing.T) {
+	quietLog()
+	env := newTestEnv(t)
+	env.arc.newWriter = func(w io.Writer, r ...age.Recipient) (io.WriteCloser, error) {
+		inner, err := age.Encrypt(w, r...)
+		if err != nil {
+			return nil, err
+		}
+		return &sideClose{WriteCloser: inner, side: func() {
+			os.Chmod(env.arc.dir, 0o500) //nolint:errcheck — r-x: rename blocked
+		}}, nil
+	}
+	mail := []byte("Subject: two\r\n\r\nbeta")
+	if _, err := env.arc.put("acc", mail); err == nil {
+		t.Fatal("rename failure silently accepted")
+	}
+	assertBlobCount(t, env.arc, 0)
+	os.Chmod(env.arc.dir, 0o700) //nolint:errcheck — restore before cleanup
+	// the orphaned tmp is recovered by the crash sweep
+	if err := sweepStaleTmp(env.arc.dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(env.arc.dir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Fatalf("sweep left orphan tmp file: %s", e.Name())
+		}
+	}
+}
+
+// A dangling-symlink .tmp entry (crashed write + tmp vanished on a share)
+// must not break the sweep; the entry itself is simply left alone.
+func TestSweepStaleTmpVanishedEntry(t *testing.T) {
+	quietLog()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "gone")
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), target); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	if err := os.Rename(target, filepath.Join(dir, "x.tmp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweepStaleTmp(dir, time.Hour); err != nil {
+		t.Fatalf("vanished entry broke the sweep: %v", err)
+	}
+}
+
+// sweepStaleTmp must report an entry it cannot delete (dir went r-x after
+// listing, e.g. a permissions race on a share) — silent loss would hide a
+// growing tmp pile-up.
+func TestSweepStaleTmpUndeletable(t *testing.T) {
+	quietLog()
+	dir := t.TempDir()
+	f := filepath.Join(dir, "old.tmp")
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(f, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil { // r-x: listable, not removable
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if err := sweepStaleTmp(dir, time.Hour); err == nil {
+		t.Fatal("sweep silently failed to delete stale tmp file")
+	}
+}
+
+// sideClose runs a fault hook on Close before delegating to the real closer.
+type sideClose struct {
+	io.WriteCloser
+	side func()
+}
+
+func (s *sideClose) Close() error {
+	err := s.WriteCloser.Close()
+	s.side()
+	return err
+}
+
+// assertBlobCount pins that a failed put left no partial blob behind.
+func assertBlobCount(t *testing.T, arc *Archive, want int) {
+	t.Helper()
+	blobs, err := arc.blobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blobs) != want {
+		t.Fatalf("blobs = %d, want %d (partial write?)", len(blobs), want)
+	}
+}

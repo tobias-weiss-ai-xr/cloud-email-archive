@@ -410,6 +410,9 @@ func ensureIndex(a *Archive) (int, error) {
 
 	segNames, err := listSegments(a)
 	if err != nil {
+		// honest gap: unreachable — blobs() listed this same dir with the
+		// same permissions moments ago; a directory cannot pass ReadDir and
+		// then fail it before any syscall in between
 		return 0, err
 	}
 	// fast path: a segment already covers exactly this blob set
@@ -540,6 +543,8 @@ func compactIndex(a *Archive, segNames []string) error {
 func pruneIndexCache(a *Archive) {
 	segNames, err := listSegments(a)
 	if err != nil {
+		// honest gap: unreachable — prune runs at the end of a successful
+		// ensureIndex/compactIndex, which just listed this same directory
 		return
 	}
 	live := map[string]bool{}

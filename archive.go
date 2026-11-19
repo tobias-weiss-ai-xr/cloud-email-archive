@@ -37,7 +37,7 @@ type Archive struct {
 func writeNewKey(keyFile string) error {
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
-		return err
+		return err // only fails on crypto/rand exhaustion — not injectable
 	}
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
 		return err
@@ -139,7 +139,7 @@ func sweepStaleTmp(dir string, olderThan time.Duration) error {
 		}
 		info, err := e.Info()
 		if err != nil {
-			continue
+			continue // entry vanished between ReadDir and lstat — race-only
 		}
 		if info.ModTime().Before(cutoff) {
 			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
@@ -187,6 +187,8 @@ func (a *Archive) blobs() ([]blob, error) {
 		}
 		info, err := e.Info()
 		if err != nil {
+			// entry vanished between ReadDir and lstat — race-only, not
+			// injectable (lstat of a dangling symlink still returns info)
 			return nil, fmt.Errorf("stat %s: %w", e.Name(), err)
 		}
 		out = append(out, blob{name: e.Name(), path: filepath.Join(a.dir, e.Name()), size: info.Size()})

@@ -16,9 +16,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-imap/v2/imapserver/imapmemserver"
 )
@@ -544,5 +546,422 @@ func TestSyncEmptyFolder(t *testing.T) {
 	}
 	if len(st.folder("test", "Leer").UIDs) != 0 {
 		t.Error("empty folder must have no UIDs")
+	}
+}
+
+// hookSession lets tests inject faults (or rewritten responses) into specific
+// IMAP commands while delegating everything else to the real session.
+type hookSession struct {
+	imapserver.Session
+	fetch   func(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error
+	list    func(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error
+	selectM func(mailbox string, options *imap.SelectOptions) (*imap.SelectData, error)
+}
+
+func (s *hookSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+	if s.fetch != nil {
+		return s.fetch(w, numSet, options)
+	}
+	return s.Session.Fetch(w, numSet, options)
+}
+
+func (s *hookSession) List(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error {
+	if s.list != nil {
+		return s.list(w, ref, patterns, options)
+	}
+	return s.Session.List(w, ref, patterns, options)
+}
+
+func (s *hookSession) Select(mailbox string, options *imap.SelectOptions) (*imap.SelectData, error) {
+	if s.selectM != nil {
+		return s.selectM(mailbox, options)
+	}
+	return s.Session.Select(mailbox, options)
+}
+
+// The server type-asserts optional interfaces (SessionIMAP4rev2 etc.) on the
+// session — an embedded interface value would hide them from the assertions,
+// so they are forwarded explicitly.
+func (s *hookSession) Namespace() (*imap.NamespaceData, error) {
+	return s.Session.(imapserver.SessionNamespace).Namespace()
+}
+
+func (s *hookSession) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest string) error {
+	return s.Session.(imapserver.SessionMove).Move(w, numSet, dest)
+}
+
+// A FETCH response with a zero-length literal must be skipped (empty body),
+// not archived, and must not fail the sync.
+func TestFetchEmptyBodySkipped(t *testing.T) {
+	quietLog()
+	u, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &hookSession{Session: s, fetch: func(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+			rw := w.CreateMessage(1)
+			rw.WriteUID(1)
+			wc := rw.WriteBodySection(&imap.FetchItemBodySection{Peek: true}, 0)
+			wc.Close() //nolint:errcheck
+			return rw.Close()
+		}}
+	})
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: real\r\n\r\nbody\r\n")
+	env := syncTestEnv(t, port, "test", nil)
+	if code := runSync(t, env.cfgPath); code != 0 {
+		t.Fatalf("empty-body fetch failed the sync: exit %d", code)
+	}
+	assertBlobCount(t, env.arc, 0)
+}
+
+// A server that answers the body fetch WITHOUT a UID: go-imap v2 beta.9
+// discards such responses unilaterally (a UID-less FETCH response can never
+// match the pending UID FETCH command), so the sync archives nothing and
+// succeeds — the message simply stays "new" for the next run. That client
+// behavior also makes fetchAndArchive's uid==0 guard unreachable against
+// beta.9; it stays as defense against future client versions.
+func TestFetchUIDLessResponseDiscarded(t *testing.T) {
+	quietLog()
+	u, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &hookSession{Session: s, fetch: func(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+			if len(options.BodySection) == 0 {
+				return s.Fetch(w, numSet, options)
+			}
+			rw := w.CreateMessage(1)
+			rw.WriteFlags(nil)
+			raw := "From: a@x.de\r\nSubject: no-uid\r\n\r\nbody\r\n"
+			wc := rw.WriteBodySection(&imap.FetchItemBodySection{Peek: true}, int64(len(raw)))
+			wc.Write([]byte(raw)) //nolint:errcheck
+			wc.Close()            //nolint:errcheck
+			return rw.Close()
+		}}
+	})
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: real\r\n\r\nbody\r\n")
+	env := syncTestEnv(t, port, "test", nil)
+	if code := runSync(t, env.cfgPath); code != 0 {
+		t.Fatalf("exit = %d, want 0 (UID-less response is discarded, not fatal)", code)
+	}
+	if blobs, _ := env.arc.blobs(); len(blobs) != 0 {
+		t.Fatalf("UID-less response archived anyway: %d blob(s)", len(blobs))
+	}
+}
+
+func (c *cappedConn) SetReadDeadline(t time.Time) error  { return c.SetDeadline(t) }
+func (c *cappedConn) SetWriteDeadline(t time.Time) error { return c.SetDeadline(t) }
+
+// cappedConn limits how far into the future the client may push socket
+// deadlines, so stuck reads surface in seconds instead of literalReadTimeout.
+type cappedConn struct {
+	net.Conn
+	cap time.Duration
+}
+
+func (c *cappedConn) SetDeadline(t time.Time) error {
+	if t.IsZero() || time.Until(t) <= c.cap {
+		return c.Conn.SetDeadline(t)
+	}
+	return c.Conn.SetDeadline(time.Now().Add(c.cap))
+}
+
+// A literal that aborts mid-stream (server crash, network drop) must fail
+// the sync loudly — a silently truncated archive is worse than a failed run.
+func TestFetchMidLiteralAbort(t *testing.T) {
+	quietLog()
+	u, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &hookSession{Session: s, fetch: func(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+			rw := w.CreateMessage(1)
+			rw.WriteUID(1)
+			wc := rw.WriteBodySection(&imap.FetchItemBodySection{Peek: true}, 500)
+			wc.Write([]byte("truncat")) //nolint:errcheck
+			wc.Close()                  //nolint:errcheck
+			return rw.Close()           // promises 500 bytes, sent 7 — client must error
+		}}
+	})
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: real\r\n\r\nbody\r\n")
+	env := syncTestEnv(t, port, "test", nil)
+	// run the client path over a capped-deadline conn: the truncated literal
+	// then surfaces as a read timeout within seconds (mirrors a real
+	// deployment's network deadline) instead of the client's 5-minute
+	// literalReadTimeout, which would overwrite any fixed deadline we set
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := imapclient.New(&cappedConn{Conn: conn, cap: 3 * time.Second}, nil)
+	if err := c.Login("testuser", "testpw").Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := c.Fetch(imap.UIDSetNum(1), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{{Peek: true}}})
+	var litErr error
+	for {
+		msg := cmd.Next()
+		if msg == nil {
+			break
+		}
+		for {
+			item := msg.Next()
+			if item == nil {
+				break
+			}
+			if bs, ok := item.(imapclient.FetchItemDataBodySection); ok && bs.Literal != nil {
+				_, litErr = io.ReadAll(bs.Literal)
+			}
+		}
+	}
+	// no cmd.Close here: the stream is desynced by the aborted literal and a
+	// graceful close would block — tear the connection down instead
+	if litErr == nil {
+		t.Fatal("truncated literal read without error")
+	}
+	if blobs, _ := env.arc.blobs(); len(blobs) != 0 {
+		t.Fatalf("truncated fetch archived data: %d blob(s)", len(blobs))
+	}
+	conn.Close() //nolint:errcheck
+}
+
+// \Noselect mailboxes (Dovecot hierarchy placeholders) must be filtered out
+// of enumeration: selecting them always fails.
+func TestSelectFoldersSkipsNoselect(t *testing.T) {
+	quietLog()
+	_, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &hookSession{Session: s, list: func(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error {
+			if err := s.List(w, ref, patterns, options); err != nil {
+				return err
+			}
+			return w.WriteList(&imap.ListData{
+				Mailbox: "ArchiveTree/2024",
+				Attrs:   []imap.MailboxAttr{imap.MailboxAttrNoSelect},
+			})
+		}}
+	})
+	c, err := dial(&Account{Name: "t", Host: "127.0.0.1", Port: port, Security: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Logout() })
+	if err := c.Login("testuser", "testpw").Wait(); err != nil {
+		t.Fatal(err)
+	}
+	found, missing, err := selectFolders(c, &Account{Name: "test", Folders: []string{"*"}}, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range found {
+		if f == "ArchiveTree/2024" {
+			t.Fatal("\\Noselect folder enumerated")
+		}
+	}
+	// INBOX (selectable) must still be found
+	if len(found) != 1 || found[0] != "INBOX" {
+		t.Fatalf("found = %v, want [INBOX]", found)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v, want none", missing)
+	}
+}
+
+// A LIST command that errors mid-response must fail selectFolders (and thus
+// the sync) — an incomplete folder inventory would silently skip mail.
+func TestSelectFoldersListError(t *testing.T) {
+	quietLog()
+	_, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &hookSession{Session: s, list: func(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error {
+			if err := s.List(w, ref, patterns, options); err != nil {
+				return err
+			}
+			return errors.New("injected list fault")
+		}}
+	})
+	c, err := dial(&Account{Name: "t", Host: "127.0.0.1", Port: port, Security: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Logout() })
+	if err := c.Login("testuser", "testpw").Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := selectFolders(c, &Account{Name: "test", Folders: []string{"*"}}, quietLog()); err == nil {
+		t.Fatal("list fault silently swallowed by selectFolders")
+	}
+}
+
+// selectFolders failure must fail syncAccount (warn-free contract: folder
+// enumeration is not optional).
+func TestSyncSelectFoldersError(t *testing.T) {
+	quietLog()
+	_, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &hookSession{Session: s, list: func(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error {
+			if err := s.List(w, ref, patterns, options); err != nil {
+				return err
+			}
+			return errors.New("injected list fault")
+		}}
+	})
+	env := syncTestEnv(t, port, "test", nil)
+	cfg, err := loadConfig(env.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, &State{Accounts: map[string]map[string]*FolderState{}}, quietLog()); err == nil {
+		t.Fatal("syncAccount swallowed selectFolders failure")
+	}
+}
+
+// A folder that LISTS fine but fails SELECT (broken mailbox on the server)
+// must fail the sync with the enumerate error naming the folder.
+func TestSyncBrokenSelect(t *testing.T) {
+	quietLog()
+	_, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &hookSession{Session: s, selectM: func(mailbox string, options *imap.SelectOptions) (*imap.SelectData, error) {
+			return nil, errors.New("injected select fault")
+		}}
+	})
+	env := syncTestEnv(t, port, "test", []string{"INBOX"})
+	cfg, err := loadConfig(env.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = syncAccount(cfg, &cfg.Accounts[0], env.arc, &State{Accounts: map[string]map[string]*FolderState{}}, quietLog())
+	if err == nil || !strings.Contains(err.Error(), "select") || !strings.Contains(err.Error(), "INBOX") {
+		t.Fatalf("want select error naming INBOX, got %v", err)
+	}
+}
+
+// A folder that SELECTs fine but whose SEARCH fails must fail the sync with
+// the enumerate error naming the folder (UID inventory incomplete).
+func TestSyncBrokenSearch(t *testing.T) {
+	quietLog()
+	u, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		// enumerateUIDs fetches UIDs only (no body section) — fault exactly that
+		return &hookSession{Session: s, fetch: func(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+			if len(options.BodySection) == 0 {
+				return errors.New("injected enumerate fault")
+			}
+			return s.Fetch(w, numSet, options)
+		}}
+	})
+	env := syncTestEnv(t, port, "test", []string{"INBOX"})
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: one\r\n\r\nbody\r\n")
+	cfg, err := loadConfig(env.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = syncAccount(cfg, &cfg.Accounts[0], env.arc, &State{Accounts: map[string]map[string]*FolderState{}}, quietLog())
+	if err == nil || !strings.Contains(err.Error(), "enumerate") || !strings.Contains(err.Error(), "INBOX") {
+		t.Fatalf("want enumerate error naming INBOX, got %v", err)
+	}
+}
+
+// A server that goes away mid-fetch (connection drop while the literal is
+// still pending) must fail the sync loudly — a truncated archive is worse
+// than a failed run. A raw TCP responder is used because the abort must be a
+// real socket close: any in-band session error keeps the connection open and
+// the client waits out its literal timeout instead of surfacing the drop.
+func TestFetchConnDropMidLiteral(t *testing.T) {
+	quietLog()
+	if raceEnabled {
+		t.Skip("go-imap v2 beta.9 client races on EOF-during-literal (reader goroutine resumes parsing while the app reads the literal) — upstream bug, not ours")
+	}
+	port := startRawAbortIMAP(t)
+	env := syncTestEnv(t, port, "test", []string{"INBOX"})
+	if code := runSync(t, env.cfgPath); code == 0 {
+		t.Fatal("connection drop mid-fetch was silently swallowed")
+	}
+	if blobs, _ := env.arc.blobs(); len(blobs) != 0 {
+		t.Fatalf("dropped fetch archived data: %d blob(s)", len(blobs))
+	}
+}
+
+// startRawAbortIMAP serves just enough IMAP to reach a body fetch: greeting,
+// LOGIN, LIST (one folder), SELECT (1 message, UIDVALIDITY), UID-only FETCH
+// (honest), body FETCH (truncated literal, then the socket closes hard).
+func startRawAbortIMAP(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveRawAbortIMAP(c)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func serveRawAbortIMAP(c net.Conn) {
+	defer c.Close() //nolint:errcheck
+	buf := make([]byte, 4096)
+	c.Write([]byte("* OK ready\r\n")) //nolint:errcheck
+	for {
+		n, err := c.Read(buf)
+		if err != nil {
+			return
+		}
+		line := string(buf[:n])
+		sp := strings.IndexByte(line, ' ')
+		if sp <= 0 {
+			continue
+		}
+		tag, rest := line[:sp], line[sp+1:]
+		switch {
+		case strings.HasPrefix(rest, "LOGIN"):
+			c.Write([]byte(tag + " OK logged in\r\n")) //nolint:errcheck
+		case strings.HasPrefix(rest, "LIST"):
+			c.Write([]byte("* LIST () \"/\" \"INBOX\"\r\n" + tag + " OK done\r\n")) //nolint:errcheck
+		case strings.HasPrefix(rest, "SELECT"), strings.HasPrefix(rest, "EXAMINE"): // syncFolder selects read-only
+			c.Write([]byte("* 1 EXISTS\r\n* OK [UIDVALIDITY 42] uids\r\n" + tag + " OK selected\r\n")) //nolint:errcheck
+		case strings.Contains(rest, "FETCH"): // plain FETCH and UID FETCH
+			if strings.Contains(rest, "BODY") {
+				// promise 500 bytes, send 7, drop — the client must error
+				c.Write([]byte("* 1 FETCH (UID 1 BODY[] {500}\r\ntruncat")) //nolint:errcheck
+				return
+			}
+			c.Write([]byte("* 1 FETCH (UID 1)\r\n" + tag + " OK done\r\n")) //nolint:errcheck
+		default:
+			c.Write([]byte(tag + " OK done\r\n")) //nolint:errcheck
+		}
+	}
+}
+
+// A server that serves a complete FETCH response but rejects the command
+// completion (tagged NO) must fail the sync at cmd.Close — partial trust is
+// no trust.
+func TestFetchTaggedNO(t *testing.T) {
+	quietLog()
+	u, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &hookSession{Session: s, fetch: func(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+			if len(options.BodySection) == 0 {
+				return s.Fetch(w, numSet, options)
+			}
+			rw := w.CreateMessage(1)
+			rw.WriteUID(1)
+			raw := "From: a@x.de\r\nSubject: complete\r\n\r\nbody\r\n"
+			wc := rw.WriteBodySection(&imap.FetchItemBodySection{Peek: true}, int64(len(raw)))
+			wc.Write([]byte(raw)) //nolint:errcheck
+			wc.Close()            //nolint:errcheck
+			if err := rw.Close(); err != nil {
+				return err
+			}
+			return &imap.Error{Type: imap.StatusResponseTypeNo, Text: "injected"}
+		}}
+	})
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: real\r\n\r\nbody\r\n")
+	env := syncTestEnv(t, port, "test", nil)
+	if code := runSync(t, env.cfgPath); code == 0 {
+		t.Fatal("tagged NO on fetch completion was silently swallowed")
+	}
+	// the body itself arrived completely and is durably archived (put ran
+	// before the completion arrived) — but the run FAILS because the UID was
+	// never remembered, so the next sync re-fetches and dedup absorbs it.
+	// Losing the notification would mean silently trusting an incomplete
+	// fetch session.
+	if blobs, _ := env.arc.blobs(); len(blobs) != 1 {
+		t.Fatalf("complete blob lost by tagged NO: %d blob(s)", len(blobs))
 	}
 }

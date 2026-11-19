@@ -1337,3 +1337,121 @@ func TestPruneIndexCacheUnreadableDir(t *testing.T) {
 		t.Fatalf("prune failure broke ensureIndex: %v", err)
 	}
 }
+
+// listSegments/post-write plumbing: after a successful segment write, the
+// follow-up directory listing must fail the ensureIndex run when the dir
+// turns -wx (rename still possible, readdir not). 0333 is the only mode that
+// separates the two operations.
+func TestEnsureIndexPostWriteListFault(t *testing.T) {
+	quietLog()
+	env := newTestEnv(t)
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	}
+	env.arc.newWriter = func(w io.Writer, r ...age.Recipient) (io.WriteCloser, error) {
+		inner, err := age.Encrypt(w, r...)
+		if err != nil {
+			return nil, err
+		}
+		return &sideClose{WriteCloser: inner, side: func() {
+			os.Chmod(env.arc.dir, 0o333) //nolint:errcheck — -wx: write ok, list not
+		}}, nil
+	}
+	if _, err := ensureIndex(env.arc); err == nil {
+		t.Fatal("listSegments failure after write silently accepted")
+	}
+	os.Chmod(env.arc.dir, 0o700) //nolint:errcheck — restore before cleanup
+	if segs, _ := listSegments(env.arc); len(segs) != 1 {
+		t.Fatalf("segment lost by post-write list fault: %d", len(segs))
+	}
+}
+
+// Compaction: the merged segment writes fine, but the subsequent inventory
+// readdir fails (-wx) — compaction must surface that and keep every original.
+func TestCompactionPostWriteListFault(t *testing.T) {
+	quietLog()
+	env := newTestEnv(t)
+	var names []string
+	for i := 0; i < 17; i++ { // one more than idxMaxSegments
+		mail := []byte("Subject: m" + string(rune('a'+i)) + "\r\n\r\nbody" + string(rune('a'+i)) + "x")
+		if _, err := env.arc.put("acc", mail); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, blobName("acc", mail))
+	}
+	for _, n := range names {
+		if _, err := writeSegment(env.arc, mkTestSegment(n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if segs, _ := listSegments(env.arc); len(segs) != 17 {
+		t.Fatalf("setup: %d segments, want 17", len(segs))
+	}
+	env.arc.newWriter = func(w io.Writer, r ...age.Recipient) (io.WriteCloser, error) {
+		inner, err := age.Encrypt(w, r...)
+		if err != nil {
+			return nil, err
+		}
+		return &sideClose{WriteCloser: inner, side: func() {
+			os.Chmod(env.arc.dir, 0o333) //nolint:errcheck
+		}}, nil
+	}
+	if _, err := ensureIndex(env.arc); err == nil {
+		t.Fatal("post-compaction readdir failure silently accepted")
+	}
+	os.Chmod(env.arc.dir, 0o700) //nolint:errcheck
+	// the merged segment already persisted before the readdir fault — the
+	// redundant duplicate is harmless (dedup by coverage), the originals
+	// were only removed after the inventory re-read failed
+	if segs, _ := listSegments(env.arc); len(segs) != 18 {
+		t.Fatalf("compaction fault lost originals: %d segments, want 17+1", len(segs))
+	}
+}
+
+// queryIndex on an unreadable archive dir must fail (callers fall back to the
+// raw scan) — silent empty results would hide a broken index.
+func TestQueryIndexUnreadableDir(t *testing.T) {
+	quietLog()
+	env := newTestEnv(t)
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureIndex(env.arc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(env.arc.dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(env.arc.dir, 0o700) })
+	if _, err := queryIndex(env.arc, "alpha"); err == nil {
+		t.Fatal("queryIndex ignored unreadable archive dir")
+	}
+}
+
+// loadSegment recovery ladder: corrupt plaintext cache AND vanished encrypted
+// source — the cache error must win, not a confusing miss.
+func TestLoadSegmentCorruptCacheVanishedSource(t *testing.T) {
+	quietLog()
+	env := newTestEnv(t)
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureIndex(env.arc); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := listSegments(env.arc)
+	if len(segs) != 1 {
+		t.Fatalf("setup: %d segments", len(segs))
+	}
+	// poison the plaintext cache, then delete the encrypted source
+	cache := filepath.Join(userCfgDir(), "index-cache", strings.TrimSuffix(strings.TrimPrefix(segs[0], ".idx-"), ".age"))
+	if err := os.WriteFile(cache, []byte("garbage-not-a-segment"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(env.arc.dir, segs[0])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadSegment(env.arc, segs[0]); err == nil {
+		t.Fatal("loadSegment accepted corrupt cache without source")
+	}
+}

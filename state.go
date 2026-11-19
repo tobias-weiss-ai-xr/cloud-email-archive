@@ -66,7 +66,7 @@ func (s *State) save(path string) error {
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
-		return err
+		return err // honest gap: structurally unreachable — fixed-shape struct
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err

@@ -428,3 +428,41 @@ func TestSyncIndexFailureWarnsNotFails(t *testing.T) {
 		t.Fatalf("blobs = %d, want 1", len(blobs))
 	}
 }
+
+// Best-effort steps must not fail the sync: with the archive dir in -wx
+// (0333) mode, the sweep's directory listing fails (warn) and the index
+// update's blob enumeration fails (warn), while blob WRITES still succeed
+// (-wx allows create+rename) — so the sync itself must exit 0 and store mail.
+func TestSyncBestEffortStepsWarnNotFail(t *testing.T) {
+	quietLog()
+	u, port := startMemIMAP(t, "testuser", "testpw")
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: one\r\n\r\nbody\r\n")
+	env := syncTestEnv(t, port, "test", nil)
+	if err := os.MkdirAll(env.arc.dir, 0o333); err != nil { // -wx: sweep/index read fails, put works
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(env.arc.dir, 0o700) })
+	var out string
+	captureStdout(t, func() {
+		out = captureStderr(t, func() {
+			if code := run([]string{"sync", "-config", env.cfgPath}); code != 0 {
+				t.Errorf("exit = %d, want 0 (degradation, not failure)", code)
+			}
+		})
+	})
+	if !strings.Contains(out, "could not sweep") {
+		t.Errorf("sweep warning missing: %q", out)
+	}
+	if !strings.Contains(out, "index update failed") {
+		t.Errorf("index warning missing: %q", out)
+	}
+	// the mail itself must still be archived
+	os.Chmod(env.arc.dir, 0o700) //nolint:errcheck — restore before verifying
+	blobs, err := env.arc.blobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blobs) != 1 {
+		t.Fatalf("blobs = %d, want 1", len(blobs))
+	}
+}
