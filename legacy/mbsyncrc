@@ -5,9 +5,9 @@
 
 # ---------- faculty dovecot ----------
 IMAPAccount faculty
-Host        imap.fakultaet.example.de   # TODO
+Host        imap.fakultaet.example.de   # your server
 Port        993
-User        weissto                     # TODO
+User        your-imap-user              # your login
 PassCmd     "cat ~/.config/imap-passwords/faculty"
 SSLType     IMAPS
 CertificateFile /etc/ssl/certs/ca-certificates.crt
@@ -31,9 +31,9 @@ SyncState *
 
 # ---------- Verwaltung exchange ----------
 IMAPAccount verwaltung
-Host        outlook.verwaltung.example.de   # TODO
+Host        outlook.verwaltung.example.de   # your server
 Port        993
-User        weissto@verwaltung.example.de   # TODO
+User        you@work.example.edu        # your login
 PassCmd     "cat ~/.config/imap-passwords/verwaltung"
 SSLType     IMAPS
 CertificateFile /etc/ssl/certs/ca-certificates.crt

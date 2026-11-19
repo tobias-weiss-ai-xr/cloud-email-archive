@@ -17,24 +17,24 @@ archive_dir = "~/Nextcloud/email-archive"
 key_file = "~/.config/cloud-email-archive/key.txt"
 state_file = "~/.config/cloud-email-archive/state.json"
 
-# --- example: faculty Dovecot ---
+# --- example: university Dovecot ---
 [[accounts]]
 name = "faculty"
-host = "imap.fakultaet.uni.de"          # TODO
+host = "imap.example.edu"               # your IMAP server
 port = 993
 security = "implicit"                   # implicit TLS on 993 (default) | starttls | none
-user = "weissto"                        # TODO
-password = "hunter2"                    # plaintext in config; or use password_cmd
+user = "your-imap-user"
+password = "app-password"               # plaintext in config; or use password_cmd
 # password_cmd = "cat ~/.config/imap-passwords/faculty"   # alternative to `password` (never store secrets in the config inside a synced folder)
 folders = ["*"]                         # "*" (default) = all, or list: ["INBOX", "Archiv"]
                                         # a listed folder missing on the server fails the sync
 
-# --- example: Verwaltung Exchange (IMAP) ---
+# --- example: work Exchange (IMAP) ---
 [[accounts]]
-name = "verwaltung"
-host = "outlook.verwaltung.uni.de"      # TODO
+name = "work"
+host = "outlook.example.edu"            # your Exchange IMAP endpoint
 port = 993
 security = "implicit"
-user = "weissto@verwaltung.uni.de"      # TODO
+user = "you@work.example.edu"
 password = "change-me"                  # app password, if MFA is enabled
 # folders = ["INBOX", "Gesendete Elemente"]

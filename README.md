@@ -62,6 +62,7 @@ cloud-email-archive index                           # build/update the search in
 cloud-email-archive extract [-dir OUT] [-account NAME]   # write decrypted .eml files
 cloud-email-archive verify  [-account NAME]         # decrypt + hash-check every blob
 cloud-email-archive keygen  [-output FILE]
+cloud-email-archive version                         # print version
 ```
 
 ## Search speed

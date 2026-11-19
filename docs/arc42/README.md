@@ -5,7 +5,7 @@ arc42-Template: https://arc42.org
 | Metadatum | Wert |
 |---|---|
 | Autor | pi / cloud-email-archive |
-| Stand | 2026 |
+| Stand | 2026 (Index-Runde) |
 | Version | 0.1.0 |
 | Status | Implementierung abgeschlossen, erste Produktion offen |
 
@@ -109,13 +109,16 @@ ein Vollbeweis der Archiv-Integrität — keine separate Checksummen-Tabelle nö
 
 ```
 cloud-email-archive (package main)
- ├── main.go          CLI-Dispatch (keygen|sync|list|search|extract|verify)
+ ├── main.go          CLI-Dispatch (keygen|sync|index|list|search|extract|verify)
  ├── config.go        TOML-Config, Defaults, Konto-Auflösung
  ├── archive.go       Age-Layer: Blobname (SHA-256), put/get/walk, Header-Parsing
  ├── state.go         state.json Laden/Speichern (UIDVALIDITY/UIDs)
- ├── sync.go          IMAP-Sync: login/select/enumerate/fetch/encrypt
+ ├── sync.go          IMAP-Sync: login/select/enumerate/fetch/encrypt (+ Index-Pflege)
  ├── view.go          list/search/extract/verify (lesend, offline)
- └── *-test.go        Unit + In-Prozess-IMAP-Integrationstest
+ ├── index.go         Verschlüsselter Trigram-Index (.idx-<sha256>.age-Segmente,
+ │                    Cache, Kompaktierung, Self-Heal; abgeleitete Daten)
+ └── *-test.go        Unit + In-Prozess-IMAP-Integrationstest, Fuzz-Targets,
+                      Benchmarks (bench_test.go), Scale-Harness (scale_test.go)
 ```
 
 ### Abhängigkeiten
@@ -140,8 +143,12 @@ Nebenläufigkeit: Konten sequenziell; ein Konto wird nie parallel abgefragt
 nur durch den Sync-Client selbst.
 
 **Lese-Kommandos (list/search/extract):** Blobs auflisten → entschlüsseln →
-Header bzw. Volltext auswerten → ausgeben. `verify`: jeden Blob entschlüsseln,
-Fehler zählen, Exit-Code != 0 bei Korruption.
+Header bzw. Volltext auswerten → ausgeben. `search` nutzt den verschlüsselten
+Trigram-Index (`index.go`): nur die Postings des Suchterms werden gelesen,
+Kandidaten-Blobs werden zur Bestätigung entschlüsselt; ohne/fallschädlichem
+Index automatisch Fallback auf Rohscan (`search --raw` erzwingt ihn). Zahlen:
+`docs/benchmark.md`. `verify`: jeden Blob entschlüsseln, Fehler zählen,
+Exit-Code != 0 bei Korruption (Index-Dateien werden ignoriert).
 
 ---
 

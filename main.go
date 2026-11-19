@@ -14,6 +14,10 @@ import (
 	"time"
 )
 
+// version is the single source for the `version` command; CI/release builds
+// can stamp it with -ldflags "-X main.version=...".
+var version = "0.1.0"
+
 const usageText = `cloud-email-archive — encrypted email archive synced to a cloud folder
 
 Commands:
@@ -60,8 +64,8 @@ func run(args []string) int {
 	case "verify":
 		err = cmdVerify(args[1:])
 	case "version":
-		fmt.Println("cloud-email-archive 0.1.0")
-	case "-h", "help":
+		fmt.Println("cloud-email-archive " + version)
+	case "-h", "-help", "--help", "help":
 		fmt.Print(usageText)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", args[0], usageText)

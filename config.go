@@ -33,11 +33,10 @@ type Account struct {
 
 func defaultConfig() *Config {
 	home, _ := os.UserHomeDir()
-	cfgDir, _ := os.UserConfigDir()
 	return &Config{
 		ArchiveDir: filepath.Join(home, "cloud-email-archive"),
-		KeyFile:    filepath.Join(cfgDir, "cloud-email-archive", "key.txt"),
-		StateFile:  filepath.Join(cfgDir, "cloud-email-archive", "state.json"),
+		KeyFile:    defaultKeyPath(),
+		StateFile:  defaultStatePath(),
 	}
 }
 

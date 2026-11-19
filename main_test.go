@@ -23,9 +23,11 @@ func TestRunDispatch(t *testing.T) {
 		wantStdout string
 		wantStderr string
 	}{
-		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "cloud-email-archive 0.1.0"},
+		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "cloud-email-archive " + version},
 		{name: "no args shows usage", args: nil, wantCode: 2, wantStdout: "Commands:"},
 		{name: "help flag", args: []string{"-h"}, wantCode: 0, wantStdout: "Commands:"},
+		{name: "help long flag", args: []string{"--help"}, wantCode: 0, wantStdout: "Commands:"},
+		{name: "help dash form", args: []string{"-help"}, wantCode: 0, wantStdout: "Commands:"},
 		{name: "help command", args: []string{"help"}, wantCode: 0, wantStdout: "Commands:"},
 		{name: "unknown command", args: []string{"frobnicate"}, wantCode: 2, wantStderr: "unknown command"},
 		{name: "list with missing config", args: []string{"list", "-config", filepath.Join(env.dir, "gone.toml")}, wantCode: 1, wantStderr: "error:"},
