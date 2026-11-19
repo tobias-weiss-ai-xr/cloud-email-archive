@@ -4,7 +4,12 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"flag"
 	"fmt"
+	"io"
+
+	"filippo.io/age"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -363,5 +368,63 @@ func TestReadCommandFlagErrors(t *testing.T) {
 		if code := run(args); code != 1 {
 			t.Errorf("run(%v) = %d, want 1", args, code)
 		}
+	}
+}
+
+// loadCfgEnv falls back to CLOUD_EMAIL_ARCHIVE_CONFIG when no -config flag is
+// given (default-path env override branch).
+func TestLoadCfgEnvEnvVar(t *testing.T) {
+	quietLog()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	cfg := fmt.Sprintf("archive_dir = %q\nkey_file = %q\nstate_file = %q\n",
+		filepath.Join(dir, "arch"), filepath.Join(dir, "key.txt"), filepath.Join(dir, "state.json"))
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNewKey(filepath.Join(dir, "key.txt")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLOUD_EMAIL_ARCHIVE_CONFIG", cfgPath)
+	env, err := loadCfgEnv(flag.NewFlagSet("list", flag.ContinueOnError), []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.cfgPath != cfgPath {
+		t.Fatalf("env var override ignored: cfgPath = %q", env.cfgPath)
+	}
+}
+
+// A failing search-index writer must not fail the sync (warn-only contract at
+// the sync level, beyond the ensureIndex-level fault test).
+func TestSyncIndexFailureWarnsNotFails(t *testing.T) {
+	quietLog()
+	u, port := startMemIMAP(t, "testuser", "testpw")
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: one\r\n\r\nbody\r\n")
+	env := syncTestEnv(t, port, "test", nil)
+	cfg, err := loadConfig(env.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// fault only the INDEX write: call 1 is the mail blob itself
+	calls := 0
+	env.arc.newWriter = func(w io.Writer, r ...age.Recipient) (io.WriteCloser, error) {
+		calls++
+		if calls > 1 {
+			return nil, errors.New("index writer injected")
+		}
+		return age.Encrypt(w, r...)
+	}
+	st, err := loadState(cfg.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+		t.Fatalf("sync failed despite index-only fault: %v", err)
+	}
+	// the mail itself must still be archived
+	blobs, _ := env.arc.blobs()
+	if len(blobs) != 1 {
+		t.Fatalf("blobs = %d, want 1", len(blobs))
 	}
 }

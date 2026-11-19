@@ -436,6 +436,10 @@ func TestCmdSearchShortTermHint(t *testing.T) {
 	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha beta")); err != nil {
 		t.Fatal(err)
 	}
+	// a second blob that does NOT match: exercises the raw-scan skip branch
+	if _, err := env.arc.put("acc", []byte("Subject: two\r\n\r\nunrelated text")); err != nil {
+		t.Fatal(err)
+	}
 	errOut := captureStderr(t, func() {
 		out := captureStdout(t, func() {
 			if err := cmdSearch([]string{"-config", env.cfgPath, "ha"}); err != nil {
@@ -443,7 +447,7 @@ func TestCmdSearchShortTermHint(t *testing.T) {
 			}
 		})
 		if !strings.Contains(out, "1 match(es)") {
-			t.Fatalf("raw scan result missing: %q", out)
+			t.Fatalf("raw scan result wrong (want exactly the matching blob): %q", out)
 		}
 	})
 	if !strings.Contains(errOut, "shorter than 3 characters") { // "ha" matches "alpha"
@@ -498,5 +502,74 @@ func TestFreshArchiveDirDegradation(t *testing.T) {
 	})
 	if strings.Contains(errOut, "no such file") {
 		t.Fatalf("search must fall back quietly on fresh install, stderr: %q", errOut)
+	}
+}
+
+// corrupt blob must fail list and extract (walk propagates decrypt errors).
+func TestCmdListCorruptBlob(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := env.arc.blobs()
+	if err != nil || len(b) != 1 {
+		t.Fatalf("blobs: %v (%v)", b, err)
+	}
+	os.WriteFile(b[0].path, []byte("garbage"), 0o600)
+	if err := cmdList([]string{"-config", env.cfgPath}); err == nil {
+		t.Fatal("list silently ignored corrupt blob")
+	}
+}
+
+func TestCmdExtractCorruptBlob(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := env.arc.blobs()
+	if err != nil || len(b) != 1 {
+		t.Fatalf("blobs: %v (%v)", b, err)
+	}
+	os.WriteFile(b[0].path, []byte("garbage"), 0o600)
+	out := t.TempDir()
+	if err := cmdExtract([]string{"-config", env.cfgPath, "-dir", out}); err == nil {
+		t.Fatal("extract silently ignored corrupt blob")
+	}
+}
+
+// index must fail loudly when blobs are unreadable (coverage probe path).
+func TestCmdIndexBlobsError(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(env.arc.dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(env.arc.dir, 0o700) })
+	if err := cmdIndex([]string{"-config", env.cfgPath}); err == nil {
+		t.Fatal("index ignored unreadable archive dir")
+	}
+}
+
+// index/extract without a usable config must fail with the config error
+// (loadCfgEnv arg-error plumbing for these commands).
+func TestCmdIndexExtractListNeedConfig(t *testing.T) {
+	quietLog()
+	t.Setenv("CLOUD_EMAIL_ARCHIVE_CONFIG", "")
+	if err := cmdIndex([]string{}); err == nil {
+		t.Fatal("index without config succeeded")
+	}
+	if err := cmdExtract([]string{}); err == nil {
+		t.Fatal("extract without config succeeded")
+	}
+	if err := cmdList([]string{}); err == nil {
+		t.Fatal("list without config succeeded")
+	}
+	if err := cmdSearch([]string{}); err == nil {
+		t.Fatal("search without config succeeded")
 	}
 }

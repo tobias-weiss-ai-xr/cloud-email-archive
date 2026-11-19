@@ -113,6 +113,9 @@ func getUvarint(b *bytes.Reader) (uint64, error) {
 	var shift uint
 	n := 0
 	for {
+		// defense-in-depth: unreachable today (a 10th continuation byte always
+		// trips the overflow check below, since c >= 0x80 > 1 at shift >= 63),
+		// but guards the loop if the shift logic is ever refactored
 		if n == binary.MaxVarintLen64 {
 			return 0, errors.New("varint too long")
 		}

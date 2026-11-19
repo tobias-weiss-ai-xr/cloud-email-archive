@@ -164,3 +164,18 @@ func TestLoadStateNullAccounts(t *testing.T) {
 		t.Fatal("accounts map must be re-initialized")
 	}
 }
+
+// save must surface mkdir failures instead of silently losing state updates.
+func TestSaveStateMkdirError(t *testing.T) {
+	quietLog()
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &State{Accounts: map[string]map[string]*FolderState{}}
+	// parent path component is a regular file → MkdirAll must fail
+	if err := s.save(filepath.Join(blocker, "state.json")); err == nil {
+		t.Fatal("save through file-as-parent-directory succeeded")
+	}
+}

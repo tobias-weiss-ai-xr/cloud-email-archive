@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -814,5 +815,525 @@ func TestGetUvarintRejects(t *testing.T) {
 	}
 	if v, err := getUvarint(bytes.NewReader([]byte{0x80, 0x02})); err != nil || v != 256 {
 		t.Fatalf("valid multi-byte varint: %d %v", v, err)
+	}
+}
+
+// ---- coverage round: parser contract, fault seams, index semantics ----
+
+// Every malformed-segment class the parser rejects, crafted at the byte level,
+// with the rejection reason asserted (contract, not just any error).
+func TestSegmentParserRejectionsFull(t *testing.T) {
+	quietLog()
+	goodCov := coverageHash([]string{"acc_aaa"})
+	// base writes magic+covHash; build continues with names and returns the
+	// buffer for case-specific tails
+	names := func(b *bytes.Buffer, ns ...string) {
+		putUvarint(b, uint64(len(ns)))
+		for _, n := range ns {
+			putUvarint(b, uint64(len(n)))
+			b.WriteString(n)
+		}
+	}
+	trigram := func(b *bytes.Buffer, key [3]byte, postings ...uint32) {
+		b.Write(key[:])
+		sort.Slice(postings, func(i, j int) bool { return postings[i] < postings[j] })
+		putUvarint(b, uint64(len(postings)))
+		prev := uint32(0)
+		for i, p := range postings {
+			if i > 0 {
+				putUvarint(b, uint64(p-postings[i-1]))
+			} else {
+				prev = p
+				putUvarint(b, uint64(p))
+			}
+		}
+		_ = prev
+	}
+	cases := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"wrong magic", append([]byte("NOPE1"), func() []byte {
+			var b bytes.Buffer
+			b.Write(goodCov[:])
+			names(&b, "acc_aaa")
+			trigram(&b, [3]byte{'a', 'b', 'c'}, 0)
+			return b.Bytes()
+		}()...), "bad index segment magic"},
+		{"blob count missing", append([]byte(idxMagic), goodCov[:]...), "blob count"},
+		{"name length missing", append([]byte(idxMagic), append(goodCov[:], 0x01)...), "blob name len"},
+		{"name length overruns buffer", func() []byte {
+			var b bytes.Buffer
+			b.Write([]byte(idxMagic))
+			b.Write(goodCov[:])
+			putUvarint(&b, 1)
+			putUvarint(&b, 0x7f) // promises 127-byte name, none follows
+			return b.Bytes()
+		}(), "EOF"},
+		{"name too long", func() []byte {
+			var b bytes.Buffer
+			b.Write([]byte(idxMagic))
+			b.Write(goodCov[:])
+			names(&b, strings.Repeat("a", idxMaxNameLen+1))
+			return b.Bytes()
+		}(), "name too long"},
+		{"trigram count missing", func() []byte {
+			var b bytes.Buffer
+			b.Write([]byte(idxMagic))
+			b.Write(goodCov[:])
+			names(&b, "acc_aaa")
+			return b.Bytes()
+		}(), "trigram count"},
+		{"trigram key truncated", func() []byte {
+			var b bytes.Buffer
+			b.Write([]byte(idxMagic))
+			b.Write(goodCov[:])
+			names(&b, "acc_aaa")
+			putUvarint(&b, 1)
+			b.WriteString("ab") // key promises 3 bytes, body ends
+			return b.Bytes()
+		}(), "EOF"},
+		{"posting count missing", func() []byte {
+			var b bytes.Buffer
+			b.Write([]byte(idxMagic))
+			b.Write(goodCov[:])
+			names(&b, "acc_aaa")
+			putUvarint(&b, 1)
+			b.WriteString("abc") // key complete, no posting count
+			return b.Bytes()
+		}(), "posting len"},
+		{"posting list exceeds blob count", func() []byte {
+			var b bytes.Buffer
+			b.Write([]byte(idxMagic))
+			b.Write(goodCov[:])
+			names(&b, "acc_aaa")
+			putUvarint(&b, 1)
+			b.WriteString("abc")
+			putUvarint(&b, 5) // claims 5 postings, only 1 blob exists
+			putUvarint(&b, 0)
+			return b.Bytes()
+		}(), "exceeds blob count"},
+		{"postings not strictly ascending", func() []byte {
+			var b bytes.Buffer
+			cov := coverageHash([]string{"acc_aaa", "acc_bbb"}) // 2 blobs: only way to get a duplicate index past the blob-count check
+			b.Write([]byte(idxMagic))
+			b.Write(cov[:])
+			names(&b, "acc_aaa", "acc_bbb")
+			putUvarint(&b, 1)
+			b.WriteString("abc")
+			putUvarint(&b, 2) // deltas 1,0 → postings [1,1] — duplicate index
+			putUvarint(&b, 1)
+			putUvarint(&b, 0)
+			return b.Bytes()
+		}(), "not strictly ascending"},
+		{"trailing garbage", func() []byte {
+			var b bytes.Buffer
+			b.Write([]byte(idxMagic))
+			b.Write(goodCov[:])
+			names(&b, "acc_aaa")
+			putUvarint(&b, 1)
+			b.WriteString("abc")
+			putUvarint(&b, 1)
+			putUvarint(&b, 0)
+			b.WriteByte(0xff) // valid body, one byte too many
+			return b.Bytes()
+		}(), "trailing"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := unmarshalSegment(tc.data)
+			if err == nil {
+				t.Fatalf("malformed segment (%s) accepted", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("wrong rejection reason: got %q, want %q", err, tc.want)
+			}
+		})
+	}
+	// control: the same structure minus the trailing byte parses cleanly
+	var ok bytes.Buffer
+	ok.Write([]byte(idxMagic))
+	ok.Write(goodCov[:])
+	names(&ok, "acc_aaa")
+	putUvarint(&ok, 1) // trigram count
+	trigram(&ok, [3]byte{'a', 'b', 'c'}, 0)
+	if _, err := unmarshalSegment(ok.Bytes()); err != nil {
+		t.Fatalf("valid crafted segment rejected: %v", err)
+	}
+}
+
+// getUvarint must reject a varint carrying data past bit 63: a 10-byte
+// sequence whose last byte still has the continuation bit overflows exactly
+// at the shift-63 guard (the separate "varint too long" check is
+// defense-in-depth; see comment in getUvarint).
+func TestGetUvarintTooLong(t *testing.T) {
+	quietLog()
+	tooLong := bytes.Repeat([]byte{0x80}, binary.MaxVarintLen64) // 10 continuing bytes
+	if _, err := getUvarint(bytes.NewReader(tooLong)); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("10-byte continuing varint accepted: %v", err)
+	}
+}
+
+// writeSegment fault injection: Write and Close failures must clean up the
+// temp file and propagate.
+func TestWriteSegmentWriteAndCloseFault(t *testing.T) {
+	quietLog()
+	for _, tc := range []struct {
+		name string
+		w    io.WriteCloser
+		want string
+	}{
+		{"write fault", &failWriter{}, "write injected"},
+		{"close fault", &failCloser{Writer: io.Discard}, "close injected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+				t.Fatal(err)
+			}
+			env.arc.newWriter = func(io.Writer, ...age.Recipient) (io.WriteCloser, error) {
+				return tc.w, nil
+			}
+			if _, err := ensureIndex(env.arc); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s not propagated: %v", tc.name, err)
+			}
+			entries, _ := os.ReadDir(env.arc.dir)
+			for _, e := range entries {
+				if strings.HasSuffix(e.Name(), ".tmp") {
+					t.Fatalf("temp file leaked after %s: %s", tc.name, e.Name())
+				}
+			}
+		})
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write injected") }
+func (failWriter) Close() error              { return nil }
+func (failWriter) Name() string              { return "fail" }
+
+type failCloser struct{ io.Writer }
+
+func (failCloser) Close() error { return errors.New("close injected") }
+
+// Rename failure: a non-empty directory already occupies the
+// content-addressed segment path (e.g. a hostile tenant planting a folder).
+// writeSegment is called directly: ensureIndex would self-heal an empty
+// obstacle away before the rename ever happens.
+func TestWriteSegmentRenameFault(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	mail := []byte("Subject: one\r\n\r\nalpha")
+	if _, err := env.arc.put("acc", mail); err != nil {
+		t.Fatal(err)
+	}
+	seg, err := buildSegment(env.arc, []string{blobName("acc", mail)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(env.arc.dir, segmentName(seg.marshal()))
+	if err := os.MkdirAll(filepath.Join(target, "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeSegment(env.arc, seg); err == nil {
+		t.Fatal("rename onto directory accepted")
+	} else if _, err := os.Stat(filepath.Join(env.arc.dir, ".idx-d26819c5abaa6e7d76aab88bfeb25f26671d3b1d4cb3997519354e07bfc317cd.age")); err == nil {
+		t.Fatal("tmp file leaked after failed rename")
+	}
+	tmpLeaked := false
+	entries, _ := os.ReadDir(env.arc.dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			tmpLeaked = true
+		}
+	}
+	if tmpLeaked {
+		t.Fatal("tmp file leaked after failed rename")
+	}
+	os.RemoveAll(target)
+	if _, err := writeSegment(env.arc, seg); err != nil { // retry works
+		t.Fatal(err)
+	}
+}
+
+// segmentCoverageHash must reject a segment whose plaintext lacks the magic.
+func TestSegmentCoverageHashBadMagic(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if err := os.MkdirAll(env.arc.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// >39 bytes so the magic check is reached before the short-read EOF
+	blob, err := encryptTestBytes(env.arc.id, []byte("NOPE1. definitely not an index segment, padded past the 39-byte header peek"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := ".idx-deadbeef.age"
+	if err := os.WriteFile(filepath.Join(env.arc.dir, name), blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := segmentCoverageHash(env.arc, name); err == nil || !strings.Contains(err.Error(), "magic") {
+		t.Fatalf("wrong-magic segment accepted: %v", err)
+	}
+}
+
+// Compaction sanitizes trigrams with EMPTY posting lists. Real builds never
+// produce them, but the canonical format permits them (a hand-crafted valid
+// segment can carry trigram -> []), so the merge must drop them instead of
+// emitting a postings block no reader can meaningfully intersect.
+func TestCompactIndexDropsEmptyPostings(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	mail := []byte("Subject: one\r\n\r\nalphazulu")
+	if _, err := env.arc.put("acc", mail); err != nil {
+		t.Fatal(err)
+	}
+	seg := mkTestSegment(blobName("acc", mail))
+	seg.tri[[3]byte{'z', 'z', 'z'}] = []uint32{} // canonical-format poison pill
+	if _, err := writeSegment(env.arc, seg); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := listSegments(env.arc)
+	if err := compactIndex(env.arc, segs); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := listSegments(env.arc)
+	if len(out) != 1 {
+		t.Fatalf("compaction left %d segments", len(out))
+	}
+	merged, err := loadSegment(env.arc, out[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := merged.tri[[3]byte{'z', 'z', 'z'}]; ok {
+		t.Fatal("empty posting list survived compaction")
+	}
+	// mkTestSegment trigrams "alpha beta gamma" — query one of those
+	if cands, err := queryIndex(env.arc, "gamma"); err != nil || len(cands) != 1 {
+		t.Fatalf("real postings lost in compaction: %v (%v)", cands, err)
+	}
+}
+
+// Term whose trigrams all exist somewhere but never in one blob: intersect
+// empties, query returns zero candidates without error (and searchIndexed
+// has nothing to decrypt).
+func TestQueryIndexEmptyIntersection(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	for _, m := range []string{
+		"Subject: one\r\n\r\nabcde zzz",   // trigrams abc,bcd,cde
+		"Subject: two\r\n\r\nxxdefxx zzz", // trigram def
+	} {
+		if _, err := env.arc.put("acc", []byte(m)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// ONE ensureIndex so both blobs share a segment — queryIndex intersects
+	// per segment; two segments would just miss trigrams entirely
+	if _, err := ensureIndex(env.arc); err != nil {
+		t.Fatal(err)
+	}
+	// "abcdef" needs abc+bcd+cde (blob 1) AND def (blob 2) — no blob has all
+	cands, err := queryIndex(env.arc, "abcdef")
+	if err != nil || len(cands) != 0 {
+		t.Fatalf("partitioned term resolved: %v (%v)", cands, err)
+	}
+}
+
+// False-positive skip: all trigrams of the term exist in ONE blob (so the
+// intersection is non-empty), but the term is not a contiguous substring —
+// searchIndexed must verify by decrypting and drop the candidate.
+func TestSearchIndexedFalsePositiveSkip(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	// chain overlaps so every trigram of "abcdefgh" occurs, yet the term
+	// itself is nowhere contiguous
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nabcdbcdecdefefgfgh zzz")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureIndex(env.arc); err != nil {
+		t.Fatal(err)
+	}
+	n, err := searchIndexed(&cmdEnv{cfg: &Config{ArchiveDir: env.arc.dir}, arc: env.arc}, "abcdefgh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("false positive counted as match: %d", n)
+	}
+	// control: a real substring match is found
+	if n, err := searchIndexed(&cmdEnv{cfg: &Config{ArchiveDir: env.arc.dir}, arc: env.arc}, "cdecdef"); err != nil || n != 1 {
+		t.Fatalf("real substring missed: %d (%v)", n, err)
+	}
+}
+
+// intersectSorted edge branches: strictly-greater elements on both sides and
+// disjoint inputs.
+func TestIntersectSortedBranches(t *testing.T) {
+	quietLog()
+	if got := intersectSorted([]uint32{1, 5, 9}, []uint32{2, 5, 10}); len(got) != 1 || got[0] != 5 {
+		t.Fatalf("intersectSorted = %v, want [5]", got)
+	}
+	if got := intersectSorted([]uint32{1, 2}, []uint32{3, 4}); len(got) != 0 {
+		t.Fatalf("disjoint inputs intersect: %v", got)
+	}
+	if got := intersectSorted(nil, []uint32{1}); len(got) != 0 {
+		t.Fatalf("nil input intersect: %v", got)
+	}
+}
+
+// A blob whose bytes are not parseable as MIME must still contribute its raw
+// text to the index (degrade-to-raw branch in appendMailText).
+func TestAppendMailTextGarbageBody(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	// header block present but malformed ("no colon" line) → mail.Read fails
+	// AFTER the split, body degrades to raw
+	if _, err := env.arc.put("acc", []byte("not-a-header\r\n\r\nneedleplain body\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureIndex(env.arc); err != nil {
+		t.Fatal(err)
+	}
+	cands, err := queryIndex(env.arc, "needleplain")
+	if err != nil || len(cands) != 1 {
+		t.Fatalf("raw-degraded blob not indexed: %v (%v)", cands, err)
+	}
+}
+
+// quoted-printable bodies must be decoded before trigramming (=XX escapes
+// would otherwise hide the text).
+func TestIndexedQuotedPrintable(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	mail := "Subject: qp\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nsearchab=6Ce term here\r\n"
+	if _, err := env.arc.put("acc", []byte(mail)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureIndex(env.arc); err != nil {
+		t.Fatal(err)
+	}
+	if cands, err := queryIndex(env.arc, "searchable"); err != nil || len(cands) != 1 {
+		t.Fatalf("QP-encoded needle not indexed: %v (%v)", cands, err)
+	}
+}
+
+// ensureIndex must fail on an unreadable archive dir (blob enumeration).
+func TestEnsureIndexUnreadableDir(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(env.arc.dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(env.arc.dir, 0o700) })
+	if _, err := ensureIndex(env.arc); err == nil {
+		t.Fatal("ensureIndex ignored unreadable archive dir")
+	}
+}
+
+// queryIndex must fail (raw-scan fallback) on a corrupt segment rather than
+// returning bogus candidates.
+func TestQueryIndexCorruptSegment(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if err := os.MkdirAll(env.arc.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := encryptTestBytes(env.arc.id, []byte("NOPE1. not a segment, padded past the 39-byte header peek for the magic check"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.arc.dir, ".idx-corrupt.age"), blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queryIndex(env.arc, "anything"); err == nil {
+		t.Fatal("queryIndex accepted corrupt segment")
+	}
+}
+
+// compactIndex called directly with a corrupt segment must error (self-heal
+// already filtered such segments out of ensureIndex's path — this is the
+// contract for direct callers).
+func TestCompactIndexCorruptSegment(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if err := os.MkdirAll(env.arc.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := encryptTestBytes(env.arc.id, []byte("NOPE1. not a segment, padded past the 39-byte header peek for the magic check"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := ".idx-corrupt.age"
+	if err := os.WriteFile(filepath.Join(env.arc.dir, name), blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := compactIndex(env.arc, []string{name}); err == nil {
+		t.Fatal("compaction accepted corrupt segment")
+	}
+}
+
+// When compaction's write fails, the ORIGINAL segments must survive (old
+// files are removed only after the merged segment is durable).
+func TestCompactionWriteFailureKeepsOriginals(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	var names []string
+	for i := 0; i < 17; i++ { // one more than idxMaxSegments
+		mail := []byte("Subject: m" + string(rune('a'+i)) + "\r\n\r\nbody" + string(rune('a'+i)) + "x")
+		if _, err := env.arc.put("acc", mail); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, blobName("acc", mail))
+	}
+	// write 17 one-blob segments directly: routing them through ensureIndex
+	// would auto-compact at the 17th (compaction triggers at >16)
+	for _, n := range names {
+		if _, err := writeSegment(env.arc, mkTestSegment(n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if segs, _ := listSegments(env.arc); len(segs) != 17 {
+		t.Fatalf("setup: %d segments, want 17", len(segs))
+	}
+	env.arc.newWriter = func(io.Writer, ...age.Recipient) (io.WriteCloser, error) {
+		return nil, errors.New("compaction write injected")
+	}
+	if _, err := ensureIndex(env.arc); err == nil || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("compaction failure not propagated: %v", err)
+	}
+	if segs, _ := listSegments(env.arc); len(segs) != 17 {
+		t.Fatalf("originals destroyed on failed compaction: %d left", len(segs))
+	}
+	// recovery: once the fault clears, compaction succeeds
+	env.arc.newWriter = age.Encrypt
+	if n, err := ensureIndex(env.arc); err != nil || n != 1 {
+		t.Fatalf("recovery compaction: n=%d err=%v", n, err)
+	}
+}
+
+// pruneIndexCache best-effort: an unreadable cache dir must not fail the
+// overall index run.
+func TestPruneIndexCacheUnreadableDir(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureIndex(env.arc); err != nil {
+		t.Fatal(err) // creates the cache dir
+	}
+	cacheDir := filepath.Join(userCfgDir(), "index-cache")
+	if err := os.Chmod(cacheDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(cacheDir, 0o700) })
+	if _, err := ensureIndex(env.arc); err != nil {
+		t.Fatalf("prune failure broke ensureIndex: %v", err)
 	}
 }

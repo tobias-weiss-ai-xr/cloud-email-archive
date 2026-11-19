@@ -595,3 +595,71 @@ func TestWalkBlobsError(t *testing.T) {
 		t.Error("callback must not run")
 	}
 }
+
+// put must surface unexpected stat errors (unreadable archive dir) instead of
+// silently treating the blob as already-present.
+func TestPutUnreadableArchiveDir(t *testing.T) {
+	quietLog()
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	arc := newArchive(dir, id)
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if _, err := arc.put("acc", []byte("mail")); err == nil {
+		t.Fatal("put into unreadable dir silently skipped")
+	}
+}
+
+// sweepStaleTmp must report an unreadable dir rather than pretending it is
+// clean (IsNotExist is the only tolerated case).
+func TestSweepStaleTmpUnreadable(t *testing.T) {
+	quietLog()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if err := sweepStaleTmp(dir, time.Hour); err == nil {
+		t.Fatal("sweep on unreadable dir returned nil")
+	}
+}
+
+// put must surface CreateTemp failures (write-protected dir) instead of
+// pretending the blob is archived.
+func TestPutWriteProtectedDir(t *testing.T) {
+	quietLog()
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	arc := newArchive(dir, id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil { // r-x: stat ok, create fails
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if _, err := arc.put("acc", []byte("mail")); err == nil {
+		t.Fatal("put into write-protected dir silently skipped")
+	}
+}
+
+// writeNewKey must surface mkdir failures (key path under a file).
+func TestWriteNewKeyMkdirError(t *testing.T) {
+	quietLog()
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeNewKey(filepath.Join(blocker, "key.txt")); err == nil {
+		t.Fatal("writeNewKey through file-as-parent succeeded")
+	}
+}
