@@ -1,0 +1,37 @@
+# hesabo — example configuration
+# Copy to ~/.config/hesabo/config.toml and fill in your accounts.
+#
+#   archive_dir  where encrypted blobs live — put this INSIDE a synced folder
+#                (e.g. ~/Nextcloud/email-archive). The cloud provider only ever
+#                sees opaque .age files; content and names are encrypted.
+#   key_file     age secret key — MUST stay OUTSIDE the synced folder.
+#                Generate with: hesabo keygen
+#   state_file   fetch bookkeeping (plaintext UIDs only, no mail content).
+#
+# Accounts as a list — each account type (Dovecot, Exchange, ...) is optional,
+# add as many as you like. IMAP only; Exchange needs an app password if MFA is on.
+
+archive_dir = "~/Nextcloud/email-archive"
+key_file = "~/.config/hesabo/key.txt"
+state_file = "~/.config/hesabo/state.json"
+
+# --- example: faculty Dovecot ---
+[[accounts]]
+name = "faculty"
+host = "imap.fakultaet.uni.de"          # TODO
+port = 993
+security = "implicit"                   # implicit TLS on 993 (default) | starttls | none
+user = "weissto"                        # TODO
+password = "hunter2"                    # plaintext in config; or use password_cmd
+# password_cmd = "cat ~/.config/imap-passwords/faculty"   # alternative to `password` (never store secrets in the config inside a synced folder)
+folders = ["*"]                         # "*" (default) = all, or list: ["INBOX", "Archiv"]
+
+# --- example: Verwaltung Exchange (IMAP) ---
+[[accounts]]
+name = "verwaltung"
+host = "outlook.verwaltung.uni.de"      # TODO
+port = 993
+security = "implicit"
+user = "weissto@verwaltung.uni.de"      # TODO
+password = "change-me"                  # app password, if MFA is enabled
+# folders = ["INBOX", "Gesendete Elemente"]

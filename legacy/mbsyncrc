@@ -1,0 +1,54 @@
+# mbsync config — hessenbox encrypted mail archive
+# Account blocks: fill in Host / User, then copy to ~/.mbsyncrc
+# Passwords live SEPARATELY in ~/.config/imap-passwords/{faculty,verwaltung} (chmod 600)
+#   -- never in this file, never in the synced Nextcloud folder.
+
+# ---------- faculty dovecot ----------
+IMAPAccount faculty
+Host        imap.fakultaet.example.de   # TODO
+Port        993
+User        weissto                     # TODO
+PassCmd     "cat ~/.config/imap-passwords/faculty"
+SSLType     IMAPS
+CertificateFile /etc/ssl/certs/ca-certificates.crt
+
+IMAPStore faculty-remote
+Account faculty
+
+MaildirStore faculty-local
+Path        ~/mail-archive/faculty/
+Inbox       ~/mail-archive/faculty/INBOX
+SubFolders  Verbatim
+
+Channel faculty
+Far  :faculty-remote:
+Near :faculty-local:
+Patterns *
+Create Both
+SyncState *
+# Expunge Both   = mirror server deletions   (default)
+# Expunge None   = archive keeps everything even if deleted on server
+
+# ---------- Verwaltung exchange ----------
+IMAPAccount verwaltung
+Host        outlook.verwaltung.example.de   # TODO
+Port        993
+User        weissto@verwaltung.example.de   # TODO
+PassCmd     "cat ~/.config/imap-passwords/verwaltung"
+SSLType     IMAPS
+CertificateFile /etc/ssl/certs/ca-certificates.crt
+
+IMAPStore verwaltung-remote
+Account verwaltung
+
+MaildirStore verwaltung-local
+Path        ~/mail-archive/verwaltung/
+Inbox       ~/mail-archive/verwaltung/INBOX
+SubFolders  Verbatim
+
+Channel verwaltung
+Far  :verwaltung-remote:
+Near :verwaltung-local:
+Patterns *
+Create Both
+SyncState *
