@@ -32,7 +32,6 @@ func accountPassword(a *Account) (string, error) {
 	}
 	return "", fmt.Errorf("account %q: neither password nor password_cmd set", a.Name)
 }
-
 func dial(a *Account) (*imapclient.Client, error) {
 	addr := net.JoinHostPort(a.Host, fmt.Sprint(a.Port))
 	opts := &imapclient.Options{TLSConfig: &tls.Config{ServerName: a.Host, MinVersion: tls.VersionTLS12}}
@@ -60,15 +59,17 @@ func syncAccount(ctx context.Context, cfg *Config, a *Account, arc *Archive, st 
 	if err := c.Login(a.User, pw).Wait(); err != nil {
 		return fmt.Errorf("%s: login: %w", a.Name, err)
 	}
+	if a.Security == "none" {
+		log.Warn("account uses security=none (plaintext IMAP)", "account", a.Name)
+	}
 	log.Info("connected", "account", a.Name, "host", a.Host)
 
 	folders, err := selectFolders(ctx, c, a)
 	if err != nil {
 		return err
 	}
-	sf := st.account(a.Name)
 	for _, folder := range folders {
-		if err := syncFolder(ctx, c, a, folder, arc, sf, log); err != nil {
+		if err := syncFolder(ctx, c, a, folder, arc, st, log); err != nil {
 			log.Error("folder sync failed", "account", a.Name, "folder", folder, "err", err)
 		}
 	}
@@ -96,7 +97,14 @@ func selectFolders(ctx context.Context, c *imapclient.Client, a *Account) ([]str
 		if ld == nil {
 			break
 		}
-		if strings.Contains(fmt.Sprint(ld.Attrs), "\\Noselect") {
+		noselect := false
+		for _, attr := range ld.Attrs {
+			if attr == imap.MailboxAttrNoSelect {
+				noselect = true
+				break
+			}
+		}
+		if noselect {
 			continue
 		}
 		available = append(available, ld.Mailbox)
@@ -123,16 +131,12 @@ func selectFolders(ctx context.Context, c *imapclient.Client, a *Account) ([]str
 	return out, nil
 }
 
-func syncFolder(ctx context.Context, c *imapclient.Client, a *Account, folder string, arc *Archive, folders map[string]*FolderState, log *slog.Logger) error {
+func syncFolder(ctx context.Context, c *imapclient.Client, a *Account, folder string, arc *Archive, st *State, log *slog.Logger) error {
 	sel, err := c.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait()
 	if err != nil {
 		return fmt.Errorf("select %q: %w", folder, err)
 	}
-	fs := folders[folder]
-	if fs == nil {
-		fs = &FolderState{}
-		folders[folder] = fs
-	}
+	fs := st.folder(a.Name, folder)
 	if fs.UIDValidity != 0 && fs.UIDValidity != sel.UIDValidity {
 		log.Warn("UIDVALIDITY changed, refetching folder", "account", a.Name, "folder", folder,
 			"old", fs.UIDValidity, "new", sel.UIDValidity)
@@ -238,6 +242,10 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 			log.Warn("empty body, skipping", "account", a.Name, "folder", folder, "uid", uid)
 			continue
 		}
+		if uid == 0 {
+			log.Warn("fetch response without UID, skipping", "account", a.Name, "folder", folder)
+			continue
+		}
 		totalAdd += int64(len(body))
 		written, err := arc.put(a.Name, body)
 		if err != nil {
@@ -263,7 +271,9 @@ func bytesCount(n int64) string {
 		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
 	case n >= 1<<20:
 		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
-	default:
+	case n >= 1<<10:
 		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
 	}
 }

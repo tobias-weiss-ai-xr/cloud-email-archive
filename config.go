@@ -57,14 +57,33 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	if cfg.ArchiveDir == "" {
-		panic("unreachable")
+		return nil, fmt.Errorf("config %s: archive_dir must not be empty", path)
+	}
+	if cfg.KeyFile == "" {
+		return nil, fmt.Errorf("config %s: key_file must not be empty", path)
+	}
+	if cfg.StateFile == "" {
+		return nil, fmt.Errorf("config %s: state_file must not be empty", path)
 	}
 	for i := range cfg.Accounts {
 		a := &cfg.Accounts[i]
 		a.Name = strings.TrimSpace(a.Name)
 		a.Host = strings.TrimSpace(a.Host)
+		a.User = strings.TrimSpace(a.User)
+		if a.Name == "" {
+			return nil, fmt.Errorf("config %s: account[%d]: name is required", path, i)
+		}
+		if a.Host == "" {
+			return nil, fmt.Errorf("config %s: account %q: host is required", path, a.Name)
+		}
+		if a.User == "" {
+			return nil, fmt.Errorf("config %s: account %q: user is required", path, a.Name)
+		}
 		if a.Port == 0 {
 			a.Port = 993
+		}
+		if a.Port < 1 || a.Port > 65535 {
+			return nil, fmt.Errorf("config %s: account %q: invalid port %d", path, a.Name, a.Port)
 		}
 		switch a.Security {
 		case "", "implicit":
@@ -82,7 +101,7 @@ func findAccount(cfg *Config, name string) (*Account, error) {
 		return nil, nil
 	}
 	for i := range cfg.Accounts {
-		if cfg.Accounts[i].Name == name {
+		if strings.EqualFold(cfg.Accounts[i].Name, name) {
 			return &cfg.Accounts[i], nil
 		}
 	}

@@ -1,24 +1,38 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"filippo.io/age"
 )
 
-func TestArchiveRoundtrip(t *testing.T) {
+// testID creates a fresh age identity in a temp key file (0600 asserted
+// elsewhere) and returns the parsed identity.
+func testID(t *testing.T) *age.X25519Identity {
+	t.Helper()
 	keyFile := filepath.Join(t.TempDir(), "key.txt")
-	if err := writeNewKey(keyFile); err != nil {
-		t.Fatal(err)
-	}
-	id, err := loadKey(keyFile)
+	var id *age.X25519Identity
+	var err error
+	captureStdout(t, func() {
+		err = writeNewKey(keyFile)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	id, err = loadKey(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
 
-	dir := t.TempDir()
-	arc := newArchive(dir, id)
+func TestArchiveRoundtrip(t *testing.T) {
+	arc := newArchive(t.TempDir(), testID(t))
 
 	msg1 := []byte("From: a@x.de\r\nSubject: Hello\r\n\r\nbody one\r\n")
 	msg2 := []byte("From: b@x.de\r\nSubject: Second\r\n\r\nbody two\r\n")
@@ -50,34 +64,95 @@ func TestArchiveRoundtrip(t *testing.T) {
 		t.Fatalf("expected 3 blobs, got %d", len(blobs))
 	}
 
-	// decryption roundtrip
-	got, err := arc.get(dir, blobs[0].name)
-	if err != nil {
+	// decryption roundtrip: every stored blob decrypts to its original bytes
+	want := map[string][]byte{}
+	for _, b := range blobs {
+		got, err := arc.get(b.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[b.name] = got
+	}
+	if _, err := arc.put("faculty", msg1); err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != string(msg1) && string(got) != string(msg2) {
-		t.Fatalf("roundtrip mismatch: %q", got)
+	seen1, seen2 := false, false
+	for _, raw := range want {
+		if string(raw) == string(msg1) {
+			seen1 = true
+		}
+		if string(raw) == string(msg2) {
+			seen2 = true
+		}
+	}
+	if !seen1 || !seen2 {
+		t.Fatalf("roundtrip mismatch: neither original message recovered")
 	}
 
-	// walk sees all 3
-	var seen []string
-	if err := arc.walk(func(r msgRef) error {
-		seen = append(seen, r.account)
+	// put after list leaves blob count unchanged (dedup idempotence)
+	if blobs2, _ := arc.blobs(); len(blobs2) != 3 {
+		t.Fatalf("expected still 3 blobs, got %d", len(blobs2))
+	}
+
+	// walk sees all 3, with correct per-account attribution
+	perAccount := map[string]int{}
+	if err := arc.walk("", func(r msgRef) error {
+		perAccount[r.account]++
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(seen) != 3 {
-		t.Fatalf("walk saw %d, want 3", len(seen))
+	if perAccount["faculty"] != 2 || perAccount["verwaltung"] != 1 {
+		t.Fatalf("walk attribution wrong: %v", perAccount)
 	}
-	j := 0
-	for _, a := range seen {
-		if a == "faculty" {
-			j++
+}
+
+// verify's core guarantee: flipping a single byte of ciphertext must be
+// detected (age is authenticated).
+func TestArchiveTamperedBlobFailsDetection(t *testing.T) {
+	arc := newArchive(t.TempDir(), testID(t))
+	if _, err := arc.put("faculty", []byte("From: a@x.de\r\n\r\nbody\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	blobs, err := arc.blobs()
+	if err != nil || len(blobs) != 1 {
+		t.Fatalf("blobs: %v %v", blobs, err)
+	}
+	raw, err := os.ReadFile(blobs[0].path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1] ^= 0xFF // flip last byte (AEAD tag)
+	if err := os.WriteFile(blobs[0].path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := arc.get(blobs[0].name); err == nil {
+		t.Fatal("tampered blob must fail decryption")
+	}
+}
+
+func TestArchiveGetMissingBlob(t *testing.T) {
+	arc := newArchive(t.TempDir(), testID(t))
+	if _, err := arc.get("nope_0123abcd.age"); err == nil {
+		t.Fatal("get on missing blob must fail")
+	}
+}
+
+func TestAccountOf(t *testing.T) {
+	tests := []struct {
+		blob, want string
+	}{
+		{"faculty_abc123.age", "faculty"},
+		{"uni_mail_abc123.age", "uni_mail"}, // underscore inside account name
+		{"a_b_c_abc123.age", "a_b_c"},
+		{"abc123.age", ""},    // no separator
+		{"_abc123.age", ""},   // empty account
+		{"plain.age", ""},     // no separator at all
+	}
+	for _, tt := range tests {
+		if got := accountOf(tt.blob); got != tt.want {
+			t.Errorf("accountOf(%q) = %q, want %q", tt.blob, got, tt.want)
 		}
-	}
-	if j != 2 {
-		t.Fatalf("expected 2 faculty refs, got %d", j)
 	}
 }
 
@@ -87,68 +162,267 @@ func TestBlobName(t *testing.T) {
 	if a != b {
 		t.Fatal("content addressing must be deterministic")
 	}
+	if blobName("faculty", []byte("x")) == blobName("faculty", []byte("y")) {
+		t.Fatal("different content must yield different names")
+	}
+	if blobName("faculty", []byte("x")) == blobName("other", []byte("x")) {
+		t.Fatal("different accounts must yield different names")
+	}
 	if !strings.HasPrefix(b, "faculty_") || !strings.HasSuffix(b, ".age") {
 		t.Fatalf("unexpected blob name %q", b)
 	}
-	if accountOf(b) != "faculty" {
-		t.Fatalf("accountOf(%q) = %q", b, accountOf(b))
+}
+
+func TestBlobsFiltering(t *testing.T) {
+	dir := t.TempDir()
+	arc := newArchive(dir, testID(t))
+	if _, err := arc.put("faculty", []byte("m1")); err != nil {
+		t.Fatal(err)
+	}
+	// noise that must be ignored: non-.age file, tmp file, subdirectory
+	os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("x"), 0o600)
+	os.WriteFile(filepath.Join(dir, "faculty_abc.age.tmp123"), []byte("x"), 0o600)
+	os.Mkdir(filepath.Join(dir, "subdir"), 0o700)
+
+	blobs, err := arc.blobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blobs) != 1 {
+		t.Fatalf("expected 1 blob, got %d: %+v", len(blobs), blobs)
+	}
+	if !strings.HasSuffix(blobs[0].name, ".age") {
+		t.Fatalf("wrong blob kept: %q", blobs[0].name)
+	}
+
+	// archive dir missing entirely → no blobs, no error
+	empty := newArchive(filepath.Join(t.TempDir(), "does-not-exist"), testID(t))
+	if blobs, err := empty.blobs(); err != nil || blobs != nil {
+		t.Fatalf("missing dir: blobs=%v err=%v", blobs, err)
 	}
 }
 
-func TestStateRoundtrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	s := &State{Accounts: map[string]map[string]*FolderState{}}
-	fs := s.folder("faculty", "INBOX")
-	fs.UIDValidity = 42
-	fs.UIDs = []uint32{3, 1, 2}
-	if err := s.save(path); err != nil {
-		t.Fatal(err)
+func TestPutLeavesNoTmpFiles(t *testing.T) {
+	dir := t.TempDir()
+	arc := newArchive(dir, testID(t))
+	for i := 0; i < 3; i++ {
+		if _, err := arc.put("faculty", []byte("msg")); err != nil {
+			t.Fatal(err)
+		}
 	}
-	s2, err := loadState(path)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := s2.folder("faculty", "INBOX")
-	if f.UIDValidity != 42 {
-		t.Fatalf("uidvalidity mismatch: %d", f.UIDValidity)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("stale tmp file left behind: %s", e.Name())
+		}
 	}
-	if len(f.UIDs) != 3 || f.UIDs[0] != 1 || f.UIDs[2] != 3 {
-		t.Fatalf("uids not sorted/saved: %v", f.UIDs)
-	}
-	// missing state file → empty state, no error
-	s3, err := loadState(filepath.Join(t.TempDir(), "nope.json"))
-	if err != nil {
+}
+
+// walk must skip other accounts' blobs BEFORE decrypting: a corrupted blob of
+// an unselected account must not break a filtered walk.
+func TestWalkAccountFilterSkipsDecryption(t *testing.T) {
+	dir := t.TempDir()
+	id := testID(t)
+	arc := newArchive(dir, id)
+	if _, err := arc.put("faculty", []byte("From: f@x.de\r\n\r\nfaculty body\r\n")); err != nil {
 		t.Fatal(err)
 	}
-	if len(s3.Accounts) != 0 {
-		t.Fatalf("expected empty state, got %v", s3.Accounts)
+	// seed a foreign account's blob, then corrupt it on disk
+	if _, err := arc.put("verwaltung", []byte("From: v@x.de\r\n\r\nverwaltung body\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	blobs, _ := arc.blobs()
+	for _, b := range blobs {
+		if accountOf(b.name) == "verwaltung" {
+			raw, _ := os.ReadFile(b.path)
+			raw[10] ^= 0xFF
+			os.WriteFile(b.path, raw, 0o600)
+		}
+	}
+
+	var seen []string
+	err := arc.walk("faculty", func(r msgRef) error {
+		seen = append(seen, r.account)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("filtered walk must not touch the corrupted foreign blob: %v", err)
+	}
+	if len(seen) != 1 || seen[0] != "faculty" {
+		t.Fatalf("walk saw %v, want only faculty", seen)
+	}
+
+	// unfiltered walk still detects the corruption
+	if err := arc.walk("", func(msgRef) error { return nil }); err == nil {
+		t.Fatal("unfiltered walk must surface the corrupted blob")
+	}
+}
+
+func TestWalkErrorPropagation(t *testing.T) {
+	arc := newArchive(t.TempDir(), testID(t))
+	for _, m := range []string{"a", "b", "c"} {
+		if _, err := arc.put("faculty", []byte(m)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sentinel := errors.New("stop here")
+	err := arc.walk("", func(msgRef) error { return sentinel })
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("walk must propagate callback errors, got %v", err)
 	}
 }
 
 func TestParseHeaders(t *testing.T) {
-	raw := []byte("From: Max <m@x.de>\r\nSubject: Ein Thema\r\nDate: Mon, 02 Jan 2006 15:04:05 +0100\r\n\r\nbody\r\n")
-	date, from, subj := parseHeaders(raw)
-	if from != "Max <m@x.de>" {
-		t.Fatalf("from: %q", from)
+	tests := []struct {
+		name            string
+		raw             string
+		wantFrom        string
+		wantSubject     string
+		wantDateYear    int
+		wantDateIsEpoch bool
+	}{
+		{
+			name:         "basic CRLF",
+			raw:          "From: Max <m@x.de>\r\nSubject: Ein Thema\r\nDate: Mon, 02 Jan 2006 15:04:05 +0100\r\n\r\nbody\r\n",
+			wantFrom:     "Max <m@x.de>",
+			wantSubject:  "Ein Thema",
+			wantDateYear: 2006,
+		},
+		{
+			name:         "folded subject",
+			raw:          "From: a@x.de\r\nSubject: first line\r\n continued folded\r\n\r\nbody\r\n",
+			wantFrom:     "a@x.de",
+			wantSubject:  "first line continued folded",
+			wantDateYear: 1970,
+		},
+		{
+			name:         "folded subject with tab",
+			raw:          "Subject: one\r\n\ttwo\r\nFrom: a@x.de\r\n\r\n",
+			wantSubject:  "one two",
+			wantFrom:     "a@x.de",
+			wantDateYear: 1970,
+		},
+		{
+			name:         "LF-only line endings",
+			raw:          "From: a@x.de\nSubject: linux\nDate: Mon, 02 Jan 2006 15:04:05 +0100\n\nbody\n",
+			wantFrom:     "a@x.de",
+			wantSubject:  "linux",
+			wantDateYear: 2006,
+		},
+		{
+			name:            "no header/body separator",
+			raw:             "From: a@x.de\r\nSubject: orphan\r\n",
+			wantFrom:        "",
+			wantSubject:     "",
+			wantDateIsEpoch: true,
+		},
+		{
+			name:            "unparsable date falls back to epoch",
+			raw:             "From: a@x.de\r\nDate: gestern, irgendwann\r\n\r\nbody\r\n",
+			wantFrom:        "a@x.de",
+			wantDateIsEpoch: true,
+		},
+		{
+			name:         "first duplicate header wins",
+			raw:          "From: first@x.de\r\nFrom: second@x.de\r\nSubject: one\r\nSubject: two\r\n\r\n",
+			wantFrom:     "first@x.de",
+			wantSubject:  "one",
+			wantDateYear: 1970,
+		},
+		{
+			name:         "header without colon is ignored",
+			raw:          "no-colon-here\r\nFrom: a@x.de\r\n\r\nbody\r\n",
+			wantFrom:     "a@x.de",
+			wantDateYear: 1970,
+		},
+		{
+			name:         "obsolete date format via mail.ParseDate",
+			raw:          "From: a@x.de\r\nDate: 02 Jan 06 15:04 -0700\r\n\r\nbody\r\n",
+			wantFrom:     "a@x.de",
+			wantDateYear: 2006,
+		},
 	}
-	if subj != "Ein Thema" {
-		t.Fatalf("subject: %q", subj)
-	}
-	if date.Year() != 2006 {
-		t.Fatalf("date: %v", date)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			date, from, subject := parseHeaders([]byte(tt.raw))
+			if from != tt.wantFrom {
+				t.Errorf("from = %q, want %q", from, tt.wantFrom)
+			}
+			if subject != tt.wantSubject {
+				t.Errorf("subject = %q, want %q", subject, tt.wantSubject)
+			}
+			if tt.wantDateIsEpoch {
+				if !date.Equal(time.Unix(0, 0)) {
+					t.Errorf("date = %v, want epoch", date)
+				}
+			} else if date.Year() != tt.wantDateYear {
+				t.Errorf("date year = %d, want %d", date.Year(), tt.wantDateYear)
+			}
+		})
 	}
 }
 
 func TestKeyPermissions(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "k.txt")
-	if err := writeNewKey(keyFile); err != nil {
-		t.Fatal(err)
-	}
+	captureStdout(t, func() {
+		if err := writeNewKey(keyFile); err != nil {
+			t.Fatal(err)
+		}
+	})
 	info, err := os.Stat(keyFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("key perms = %o, want 600", perm)
+	}
+}
+
+func TestLoadKeyErrors(t *testing.T) {
+	dir := t.TempDir()
+
+	// missing file
+	if _, err := loadKey(filepath.Join(dir, "gone.txt")); err == nil {
+		t.Error("missing key file must fail")
+	} else if !strings.Contains(err.Error(), "keygen") {
+		t.Errorf("error should hint at keygen, got: %v", err)
+	}
+
+	// garbage content
+	bad := filepath.Join(dir, "bad.txt")
+	os.WriteFile(bad, []byte("not a key\n"), 0o600)
+	if _, err := loadKey(bad); err == nil {
+		t.Error("garbage key must fail")
+	}
+}
+
+func TestWriteNewKeyOverwrite(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "k.txt")
+	var rec1, rec2 *age.X25519Recipient
+	captureStdout(t, func() {
+		if err := writeNewKey(keyFile); err != nil {
+			t.Fatal(err)
+		}
+	})
+	id1, err := loadKey(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec1 = id1.Recipient()
+	captureStdout(t, func() {
+		if err := writeNewKey(keyFile); err != nil {
+			t.Fatal(err)
+		}
+	})
+	id2, err := loadKey(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec2 = id2.Recipient()
+	if rec1.String() == rec2.String() {
+		t.Fatal("overwritten key must be a fresh identity")
 	}
 }

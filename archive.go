@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"net/mail"
 )
 
 type Archive struct {
@@ -83,41 +84,44 @@ func (a *Archive) put(account string, raw []byte) (written bool, err error) {
 	if err := os.MkdirAll(a.dir, 0o700); err != nil {
 		return false, err
 	}
-	tmp := p + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// unique tmp file per write so concurrent sync runs (e.g. two machines
+	// syncing the same share) never clobber each other's in-progress blob
+	tmp, err := os.CreateTemp(a.dir, name+".tmp")
 	if err != nil {
 		return false, err
 	}
-	w, err := age.Encrypt(f, a.id.Recipient())
+	cleanup := func() { tmp.Close(); os.Remove(tmp.Name()) }
+	w, err := age.Encrypt(tmp, a.id.Recipient())
 	if err != nil {
-		f.Close()
-		os.Remove(tmp)
+		cleanup()
 		return false, err
 	}
 	if _, err := w.Write(raw); err != nil {
-		f.Close()
-		os.Remove(tmp)
+		cleanup()
 		return false, err
 	}
 	if err := w.Close(); err != nil {
-		f.Close()
-		os.Remove(tmp)
+		cleanup()
 		return false, err
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
 		return false, err
 	}
-	if err := os.Rename(tmp, p); err != nil {
-		os.Remove(tmp)
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		os.Remove(tmp.Name())
+		return false, err
+	}
+	if err := os.Rename(tmp.Name(), p); err != nil {
+		os.Remove(tmp.Name())
 		return false, err
 	}
 	return true, nil
 }
 
-// get decrypts a single blob into the raw message.
-func (a *Archive) get(dir, name string) ([]byte, error) {
-	f, err := os.Open(filepath.Join(dir, name))
+// get decrypts a single blob from the archive into the raw message.
+func (a *Archive) get(name string) ([]byte, error) {
+	f, err := os.Open(filepath.Join(a.dir, name))
 	if err != nil {
 		return nil, err
 	}
@@ -156,22 +160,29 @@ func (a *Archive) blobs() ([]blob, error) {
 	return out, nil
 }
 
-// accountOf derives the account name from a blob filename.
+// accountOf derives the account name from a blob filename. The SHA-256 hash
+// never contains '_', so splitting at the LAST underscore is safe even for
+// account names that themselves contain underscores (e.g. "uni_mail").
 func accountOf(name string) string {
-	if i := strings.IndexByte(name, '_'); i > 0 {
+	if i := strings.LastIndexByte(name, '_'); i > 0 {
 		return name[:i]
 	}
 	return ""
 }
 
-// walk decrypts every blob and calls fn with the result; stop early via errStop.
-func (a *Archive) walk(fn func(msgRef) error) error {
+// walk decrypts blobs and calls fn with each result; blobs of another account
+// are skipped before decryption when account is non-empty. Stop early via the
+// callback's error (e.g. errStop for limits).
+func (a *Archive) walk(account string, fn func(msgRef) error) error {
 	blobs, err := a.blobs()
 	if err != nil {
 		return err
 	}
 	for _, b := range blobs {
-		raw, err := a.get(a.dir, b.name)
+		if account != "" && !strings.EqualFold(accountOf(b.name), account) {
+			continue // filter before decrypt: wrong-account blobs cost nothing
+		}
+		raw, err := a.get(b.name)
 		if err != nil {
 			return fmt.Errorf("%s: %w", b.name, err)
 		}
@@ -182,30 +193,36 @@ func (a *Archive) walk(fn func(msgRef) error) error {
 	return nil
 }
 
-// msgRef is a decrypted message with header fields for list/search/extract.
+// msgRef is a decrypted message reference with its raw RFC822 bytes.
 type msgRef struct {
 	account string
 	path    string
 	raw     []byte
-	date    time.Time
-	from    string
-	subject string
 }
 
-// parseHeaders extracts date/from/subject from raw RFC822 bytes.
+// parseHeaders extracts date/from/subject from raw RFC822 bytes. Folded
+// headers (continuation lines starting with blank/tab) are unfolded; the first
+// occurrence of each header wins; an unparsable or missing Date yields the
+// Unix epoch.
 func parseHeaders(raw []byte) (date time.Time, from, subject string) {
 	date = time.Unix(0, 0)
-	// normalize CRLF/LF to CRLF without double-adding \r
-	lf := bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
-	crlf := bytes.ReplaceAll(lf, []byte("\n"), []byte("\r\n"))
+	// normalize any line ending to CRLF
+	crlf := bytes.ReplaceAll(bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")), []byte("\n"), []byte("\r\n"))
 	idx := bytes.Index(crlf, []byte("\r\n\r\n"))
 	if idx < 0 {
 		return
 	}
-	hdr := crlf[:idx]
-	for _, line := range bytes.Split(hdr, []byte("\r\n")) {
-		// only first occurrence of each header matters; headers may be folded
-		line = bytes.TrimPrefix(line, []byte("\r"))
+	// unfold: continuation lines are appended to the preceding header line
+	var lines [][]byte
+	for _, line := range bytes.Split(crlf[:idx], []byte("\r\n")) {
+		if len(lines) > 0 && len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+			cont := append([]byte(" "), bytes.TrimLeft(line, " \t")...)
+			lines[len(lines)-1] = append(lines[len(lines)-1], cont...)
+			continue
+		}
+		lines = append(lines, line)
+	}
+	for _, line := range lines {
 		colon := bytes.IndexByte(line, ':')
 		if colon <= 0 {
 			continue
@@ -214,10 +231,8 @@ func parseHeaders(raw []byte) (date time.Time, from, subject string) {
 		val := strings.TrimSpace(string(line[colon+1:]))
 		switch key {
 		case "date":
-			if date.IsZero() || date.Equal(time.Unix(0, 0)) {
-				if t, err := time.Parse(time.RFC1123Z, val); err == nil {
-					date = t
-				} else if t, err := time.Parse(time.RFC1123, val); err == nil {
+			if date.Equal(time.Unix(0, 0)) {
+				if t, err := mail.ParseDate(val); err == nil {
 					date = t
 				}
 			}

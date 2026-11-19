@@ -1,10 +1,11 @@
 package main
 
-// cloud-email-archive — encrypted email archive on next.hessenbox (or any synced folder).
+// cloud-email-archive — encrypted email archive synced to any cloud folder.
 // Single static binary: fetch (IMAP) + encrypt (age) + archive, cross-platform.
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -31,46 +32,59 @@ Run "cloud-email-archive <cmd> -h" for command-specific flags.
 `
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if len(os.Args) < 2 {
+	os.Exit(run(os.Args[1:]))
+}
+
+// run executes one CLI invocation and returns the process exit code. Kept
+// free of os.Exit so tests can exercise the dispatch table.
+func run(args []string) int {
+	if len(args) == 0 {
 		fmt.Print(usageText)
-		os.Exit(2)
+		return 2
 	}
 	var err error
-	switch os.Args[1] {
+	switch args[0] {
 	case "keygen":
-		err = cmdKeygen(os.Args[2:])
+		err = cmdKeygen(args[1:])
 	case "sync":
-		err = cmdSync(os.Args[2:], log)
+		err = cmdSync(args[1:], slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	case "list":
-		err = cmdList(os.Args[2:])
+		err = cmdList(args[1:])
 	case "search":
-		err = cmdSearch(os.Args[2:])
+		err = cmdSearch(args[1:])
 	case "extract":
-		err = cmdExtract(os.Args[2:])
+		err = cmdExtract(args[1:])
 	case "verify":
-		err = cmdVerify(os.Args[2:])
+		err = cmdVerify(args[1:])
 	case "version":
 		fmt.Println("cloud-email-archive 0.1.0")
 	case "-h", "help":
 		fmt.Print(usageText)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usageText)
-		os.Exit(2)
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", args[0], usageText)
+		return 2
 	}
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0 // usage already printed by the flag package
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 type cmdEnv struct {
-	cfg *Config
-	arc *Archive
-	acc *Account // nil = all accounts
+	cfgPath string
+	cfg     *Config
+	arc     *Archive
+	account string // -account filter: raw name (view commands) or resolved account (sync)
 }
 
-// loadCfgEnv parses flags, loads config (with -config override) and the key.
+// loadCfgEnv parses flags and loads config (with -config override) and the key.
+// The -account value is kept as a raw filter string; only sync resolves it
+// against the config (read commands must also see accounts that have since
+// been removed from the config — the archive is append-only).
 func loadCfgEnv(fs *flag.FlagSet, args []string) (*cmdEnv, error) {
 	cfgPath := fs.String("config", "", "config file")
 	account := fs.String("account", "", "only this account")
@@ -80,18 +94,12 @@ func loadCfgEnv(fs *flag.FlagSet, args []string) (*cmdEnv, error) {
 	if *cfgPath == "" {
 		*cfgPath = getenvDefault("CLOUD_EMAIL_ARCHIVE_CONFIG", defaultConfigPath())
 	}
+	env := &cmdEnv{cfgPath: *cfgPath, account: strings.TrimSpace(*account)}
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
 		return nil, err
 	}
-	env := &cmdEnv{cfg: cfg}
-	if *account != "" {
-		acc, err := findAccount(cfg, *account)
-		if err != nil {
-			return nil, err
-		}
-		env.acc = acc
-	}
+	env.cfg = cfg
 	env.arc, err = openArchive(cfg)
 	if err != nil {
 		return nil, err
@@ -106,13 +114,18 @@ func cmdSync(args []string, log *slog.Logger) error {
 		return err
 	}
 	cfg, arc := env.cfg, env.arc
-	if env.acc != nil {
-		filtered := *env.cfg
-		filtered.Accounts = []Account{*env.acc}
+	if env.account != "" {
+		// sync requires a configured account (read commands don't)
+		acc, err := findAccount(cfg, env.account)
+		if err != nil {
+			return err
+		}
+		filtered := *cfg
+		filtered.Accounts = []Account{*acc}
 		cfg = &filtered
 	}
 	if len(cfg.Accounts) == 0 {
-		return fmt.Errorf("no accounts configured (add [[accounts]] sections to %s)", fs.Arg(0))
+		return fmt.Errorf("no accounts configured (add [[accounts]] sections to %s)", env.cfgPath)
 	}
 
 	st, err := loadState(cfg.StateFile)
@@ -120,16 +133,19 @@ func cmdSync(args []string, log *slog.Logger) error {
 		return err
 	}
 	ctx := context.Background()
+	// one failed account must not mask the others, but it must fail the run
+	var errs []error
 	for i := range cfg.Accounts {
 		if err := syncAccount(ctx, cfg, &cfg.Accounts[i], arc, st, log); err != nil {
 			log.Error("sync failed", "account", cfg.Accounts[i].Name, "err", err)
+			errs = append(errs, fmt.Errorf("account %s: %w", cfg.Accounts[i].Name, err))
 		}
 	}
 	if err := st.save(cfg.StateFile); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
 	log.Info("sync done", "archive", cfg.ArchiveDir)
-	return nil
+	return errors.Join(errs...)
 }
 
 func cmdKeygen(args []string) error {
@@ -179,6 +195,6 @@ func openArchive(cfg *Config) (*Archive, error) {
 	return newArchive(cfg.ArchiveDir, id), nil
 }
 
-func wantAccount(acc *Account, name string) bool {
-	return acc == nil || strings.EqualFold(acc.Name, name)
+func wantAccount(filter, name string) bool {
+	return filter == "" || strings.EqualFold(filter, name)
 }

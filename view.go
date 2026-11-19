@@ -11,6 +11,12 @@ import (
 	"strings"
 )
 
+// printMsg renders one message line for list/search.
+func printMsg(account string, raw []byte) {
+	date, from, subject := parseHeaders(raw)
+	fmt.Printf("%-11s %s  %-44s  %s\n", account, date.Format("2006-01-02"), truncate(subject, 44), truncate(from, 30))
+}
+
 func cmdList(args []string) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	limit := fs.Int("limit", 0, "max messages (default all)")
@@ -19,15 +25,11 @@ func cmdList(args []string) error {
 		return err
 	}
 	count := 0
-	err = env.arc.walk(func(r msgRef) error {
-		if !wantAccount(env.acc, r.account) {
-			return nil
-		}
+	err = env.arc.walk(env.account, func(r msgRef) error {
 		if *limit > 0 && count >= *limit {
 			return errStop
 		}
-		date, from, subject := parseHeaders(r.raw)
-		fmt.Printf("%-11s %s  %-44s  %s\n", r.account, date.Format("2006-01-02"), truncate(subject, 44), truncate(from, 30))
+		printMsg(r.account, r.raw)
 		count++
 		return nil
 	})
@@ -48,15 +50,11 @@ func cmdSearch(args []string) error {
 	}
 	term := strings.ToLower(strings.Join(fs.Args(), " "))
 	matches := 0
-	err = env.arc.walk(func(r msgRef) error {
-		if !wantAccount(env.acc, r.account) {
-			return nil
-		}
+	err = env.arc.walk(env.account, func(r msgRef) error {
 		if !strings.Contains(strings.ToLower(string(r.raw)), term) {
 			return nil
 		}
-		date, from, subject := parseHeaders(r.raw)
-		fmt.Printf("%-11s %s  %-44s  %s\n", r.account, date.Format("2006-01-02"), truncate(subject, 44), truncate(from, 30))
+		printMsg(r.account, r.raw)
 		matches++
 		return nil
 	})
@@ -78,10 +76,7 @@ func cmdExtract(args []string) error {
 		return fmt.Errorf("extract needs -dir OUT")
 	}
 	n := 0
-	err = env.arc.walk(func(r msgRef) error {
-		if !wantAccount(env.acc, r.account) {
-			return nil
-		}
+	err = env.arc.walk(env.account, func(r msgRef) error {
 		outDir := filepath.Join(*dir, r.account)
 		if err := os.MkdirAll(outDir, 0o700); err != nil {
 			return err
@@ -112,11 +107,11 @@ func cmdVerify(args []string) error {
 	}
 	bad, ok, skipped := 0, 0, 0
 	for _, b := range blobs {
-		if !wantAccount(env.acc, accountOf(b.name)) {
+		if !wantAccount(env.account, accountOf(b.name)) {
 			skipped++
-			continue
+			continue // other account's blob: not our problem, don't decrypt
 		}
-		if _, err := env.arc.get(env.cfg.ArchiveDir, b.name); err != nil {
+		if _, err := env.arc.get(b.name); err != nil {
 			fmt.Fprintf(os.Stderr, "FAIL  %s: %v\n", b.name, err)
 			bad++
 		} else {
@@ -132,9 +127,15 @@ func cmdVerify(args []string) error {
 
 var errStop = fmt.Errorf("stop")
 
+// truncate shortens s to at most n display columns (runes), appending an
+// ellipsis. Rune-safe: never splits a multi-byte character.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }
