@@ -42,6 +42,7 @@ func cmdList(args []string) error {
 
 func cmdSearch(args []string) error {
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
+	rawScan := fs.Bool("raw", false, "exhaustive scan over raw mail bytes, skip the index")
 	env, err := loadCfgEnv(fs, args)
 	if err != nil {
 		return err
@@ -50,6 +51,18 @@ func cmdSearch(args []string) error {
 		return errors.New("search needs a term")
 	}
 	term := strings.ToLower(strings.Join(fs.Args(), " "))
+	term = strings.ReplaceAll(term, "\r", "")
+
+	if !*rawScan && len(term) >= 3 {
+		matches, err := searchIndexed(env, term)
+		if err == nil {
+			fmt.Printf("%d match(es)\n", matches)
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "search index unavailable (%v); falling back to raw scan\n", err)
+	}
+
+	// raw path: exact byte-substring over full decrypted mail, no index
 	matches := 0
 	err = env.arc.walk(env.account, func(r msgRef) error {
 		if !strings.Contains(strings.ToLower(string(r.raw)), term) {
@@ -63,6 +76,26 @@ func cmdSearch(args []string) error {
 		return err
 	}
 	fmt.Printf("%d match(es)\n", matches)
+	return nil
+}
+
+// cmdIndex builds/updates the search index on demand (sync does it
+// automatically). Purely derived: safe to run any time, safe to delete.
+func cmdIndex(args []string) error {
+	fs := flag.NewFlagSet("index", flag.ContinueOnError)
+	env, err := loadCfgEnv(fs, args)
+	if err != nil {
+		return err
+	}
+	segs, err := ensureIndex(env.arc)
+	if err != nil {
+		return err
+	}
+	blobs, err := env.arc.blobs()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("index: %d blob(s) covered, %d segment(s)\n", len(blobs), segs)
 	return nil
 }
 

@@ -19,8 +19,9 @@ const usageText = `cloud-email-archive — encrypted email archive synced to a c
 Commands:
   keygen              generate a new age key (run once)
   sync                fetch IMAP accounts, encrypt new mail into the archive
+  index               build/update the encrypted search index (runs after sync)
   list                show message headers from the archive (decrypts locally)
-  search TERM         full-text search over archived messages
+  search TERM         full-text search over archived messages (--raw for byte scan)
   extract             write decrypted messages as .eml into a directory
   verify              decrypt-check every blob in the archive
   version
@@ -48,6 +49,8 @@ func run(args []string) int {
 		err = cmdKeygen(args[1:])
 	case "sync":
 		err = cmdSync(args[1:], slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	case "index":
+		err = cmdIndex(args[1:])
 	case "list":
 		err = cmdList(args[1:])
 	case "search":
@@ -148,6 +151,10 @@ func cmdSync(args []string, log *slog.Logger) error {
 	if err := st.save(cfg.StateFile); err != nil {
 		// join, don't return early — account errors must still surface
 		errs = append(errs, fmt.Errorf("save state: %w", err))
+	}
+	// keep the search index fresh; purely derived data — never fail the sync
+	if _, err := ensureIndex(arc); err != nil {
+		log.Warn("index update failed; search falls back to raw scan", "err", err)
 	}
 	log.Info("sync done", "archive", cfg.ArchiveDir)
 	return errors.Join(errs...)

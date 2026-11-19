@@ -181,7 +181,8 @@ func (a *Archive) blobs() ([]blob, error) {
 	}
 	var out []blob
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".age") {
+		// dot-prefixed names are tool-internal (search index segments), never mail
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || !strings.HasSuffix(e.Name(), ".age") {
 			continue
 		}
 		info, err := e.Info()

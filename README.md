@@ -56,11 +56,43 @@ Paths can be overridden in the TOML or via `-config FILE`;
 ```sh
 cloud-email-archive sync    [-account NAME]         # fetch IMAP + encrypt (incremental)
 cloud-email-archive list    [-account NAME] [-limit 20]
-cloud-email-archive search  [-account NAME] TERM    # full-text search over decrypted mails
+cloud-email-archive search  [-account NAME] TERM    # full-text search over decoded mail text
+cloud-email-archive search  [-account NAME] -raw TERM  # exact-byte scan over raw mail bytes
+cloud-email-archive index                           # build/update the search index (sync does this too)
 cloud-email-archive extract [-dir OUT] [-account NAME]   # write decrypted .eml files
 cloud-email-archive verify  [-account NAME]         # decrypt + hash-check every blob
 cloud-email-archive keygen  [-output FILE]
 ```
+
+## Search speed
+
+Search runs against an **encrypted trigram index** that lives next to the
+blobs (`.idx-<sha256>.age`) and is maintained automatically by every `sync`
+(run `index` to build it on demand). The index is derived data: rebuildable
+from blobs alone, byte-deterministic (same blobs ⇒ identical segment ⇒
+multi-machine dedup, no sync conflicts), and verified against the archive on
+every query. Measured on this project's benchmark corpus (details and
+reproduction steps in [`docs/benchmark.md`](docs/benchmark.md)):
+
+| Archive size | First index build | Later `index` runs | Search (indexed)  | Raw scan (`-raw`) |
+| ------------:| -----------------:| ------------------:| -----------------:| -----------------:|
+| 500 MB       | 2.9 s             | **4 ms**           | **~15 ms**        | ~7 s              |
+| 8 GB         | 40–80 s           | **20–30 ms**       | **0.16 s** + one decrypt per match | 36–100 s |
+| 500 GB (extrapolated) | ~1 h, one-time | seconds      | sub-second lookup | hours             |
+
+- Queries only touch the searched term's trigram postings — lookup time is
+  essentially independent of archive size (a no-match search over 8 GB took
+  0.16 s). Matches are then confirmed by decrypting just the candidate
+  blobs (each match costs one blob decrypt, which you would pay anyway to
+  read the mail).
+- The index covers decoded `text/*` parts (base64/quoted-printable decoded,
+  RFC-822 nesting included) plus all headers; binary attachment *contents*
+  are not indexed — use `search -raw` (exact bytes, slow) for those, or for
+  terms shorter than 3 characters, or for byte ranges after the final MIME
+  boundary.
+- If the index is missing or damaged, search transparently falls back to the
+  raw scan; a broken index never fails a sync or a search, and `verify`
+  ignores index files (the mail blobs remain the only source of truth).
 
 ## Operation / Automation
 
@@ -80,7 +112,8 @@ crontab -e
   stays untouched.
 - **Incremental & resumable:** UID/UIDVALIDITY progress in `state.json`; on
   UIDVALIDITY change the folder is cleanly re-fetched. Interrupted runs simply
-  continue where they left off.
+  continue where they left off. The search index is maintained the same way:
+  each sync appends one small derived segment, never re-scans.
 - **Provider-agnostic:** the archive is just files in a folder. Any storage
   that can sync or mount a directory works — no provider API in the binary.
 - **Account types optional:** `[[accounts]]` is a generic list. Dovecot and

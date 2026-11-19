@@ -6,6 +6,7 @@ package main
 // `go test` (automatic); to actually fuzz: go test -fuzz FuzzParseHeaders.
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,32 @@ func FuzzParseHeaders(f *testing.F) {
 			if strings.ContainsFunc(v, func(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }) {
 				t.Errorf("%s contains control char: %q (input %q)", label, v, raw)
 			}
+		}
+	})
+}
+
+// Index segments are content-addressed files in the (provider-visible) sync
+// folder and plaintext cache entries — both can be corrupted or tampered
+// with. unmarshalSegment must reject garbage instead of panicking. Seeds also
+// pin the canonical format. To fuzz: go test -fuzz FuzzSegmentParse.
+func FuzzSegmentParse(f *testing.F) {
+	s := mkTestSegment("acc_aaa", "acc_bbb")
+	f.Add(s.marshal())
+	f.Add([]byte(idxMagic))
+	f.Add([]byte(idxMagic + "short"))
+	good := s.marshal()
+	// corrupt the postings area: flip the last byte
+	bad := append([]byte(nil), good...)
+	bad[len(bad)-1] ^= 0xff
+	f.Add(bad)
+	f.Fuzz(func(t *testing.T, data []byte) {
+		s, err := unmarshalSegment(data)
+		if err != nil {
+			return // rejection is fine; panic or hang is not
+		}
+		// any accepted segment must re-serialize to identical bytes
+		if !bytes.Equal(s.marshal(), data) {
+			t.Fatalf("accepted segment is not canonical: %x vs %x", s.marshal(), data)
 		}
 	})
 }
