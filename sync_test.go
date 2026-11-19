@@ -191,3 +191,66 @@ func TestDialStartTLS(t *testing.T) {
 		t.Fatalf("login over starttls failed: %v", err)
 	}
 }
+
+// selectFolders semantics against a live server: empty list = all, "*" = all,
+// case-insensitive matching, missing folders reported as missing.
+func TestSelectFoldersSemantics(t *testing.T) {
+	u, port := startMemIMAP(t, "testuser", "testpw")
+	if err := u.Create("Archiv", nil); err != nil {
+		t.Fatal(err)
+	}
+	// security=none: the memserver is plaintext (also covers dial's none branch)
+	c, err := dial(&Account{Name: "t", Host: "127.0.0.1", Port: port, Security: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.Login("testuser", "testpw").Wait(); err != nil {
+		t.Fatal(err)
+	}
+	a := Account{Name: "t"}
+
+	t.Run("empty list = all folders", func(t *testing.T) {
+		a.Folders = nil
+		found, missing, err := selectFolders(c, &a, quietLog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(missing) != 0 || len(found) < 2 {
+			t.Fatalf("found=%v missing=%v, want both folders, none missing", found, missing)
+		}
+	})
+	t.Run("star = all folders", func(t *testing.T) {
+		a.Folders = []string{"*"}
+		found, missing, err := selectFolders(c, &a, quietLog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(missing) != 0 || len(found) < 2 {
+			t.Fatalf("found=%v missing=%v", found, missing)
+		}
+	})
+	t.Run("case-insensitive match, missing reported", func(t *testing.T) {
+		a.Folders = []string{"inbox", "Ghost"}
+		found, missing, err := selectFolders(c, &a, quietLog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(found) != 1 || !strings.EqualFold(found[0], "inbox") {
+			t.Fatalf("found=%v, want inbox", found)
+		}
+		if len(missing) != 1 || missing[0] != "Ghost" {
+			t.Fatalf("missing=%v, want Ghost", missing)
+		}
+	})
+}
+
+// syncAccount must fail before dialing when the account has no credentials.
+func TestSyncAccountNoPassword(t *testing.T) {
+	a := &Account{Name: "nopw", Host: "127.0.0.1", Port: 1, Security: "none"}
+	err := syncAccount(&Config{ArchiveDir: t.TempDir()}, a, newArchive(t.TempDir(), testID(t)),
+		&State{Accounts: map[string]map[string]*FolderState{}}, quietLog())
+	if err == nil || !strings.Contains(err.Error(), "neither password nor password_cmd") {
+		t.Fatalf("err = %v, want credential error", err)
+	}
+}

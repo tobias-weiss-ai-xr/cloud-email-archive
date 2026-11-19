@@ -3,8 +3,10 @@ package main
 // CLI dispatch tests for run() — no network, no IMAP server.
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -235,4 +237,129 @@ func TestCmdSyncErrorBranches(t *testing.T) {
 			t.Errorf("stderr = %q", out)
 		}
 	})
+}
+
+// main() is a one-line os.Exit wrapper — only testable via subprocess
+// re-exec. Its single os.Exit statement cannot report in-process coverage
+// (os.Exit bypasses both the testing profile writer and go1.20+ GOCOVERDIR
+// raw-counter emission — neither has an atexit hook), so it intentionally
+// stays at 0% in `go tool cover`; this test proves the wiring instead.
+func TestMainSubprocess(t *testing.T) {
+	if os.Getenv("CEA_MAIN_CHILD") == "1" {
+		main() // exits the process
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMainSubprocess$")
+	cmd.Env = append(os.Environ(), "CEA_MAIN_CHILD=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("want ExitError, got %v (stderr: %s)", err, stderr.String())
+	}
+	// child os.Args[1:] = ["-test.run=^TestMainSubprocess$"] -> unknown command -> 2
+	if code := exitErr.ExitCode(); code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr: %s)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown command") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// flag parse errors surface from loadCfgEnv for every command (list here).
+func TestLoadCfgEnvFlagError(t *testing.T) {
+	env := newTestEnv(t)
+	var out string
+	out = captureStderr(t, func() {
+		if code := run([]string{"list", "-bogus", "-config", env.cfgPath}); code != 1 {
+			t.Errorf("exit = %d, want 1", code)
+		}
+	})
+	if !strings.Contains(out, "flag provided but not defined") {
+		t.Errorf("stderr = %q", out)
+	}
+}
+
+// -h prints usage and exits 0 (flag.ErrHelp mapped to success).
+func TestFlagErrHelpExitsZero(t *testing.T) {
+	for _, args := range [][]string{{"list", "-h"}, {"sync", "-h"}, {"verify", "-h"}} {
+		var out string
+		out = captureStderr(t, func() {
+			if code := run(args); code != 0 {
+				t.Errorf("run(%v) = %d, want 0", args, code)
+			}
+		})
+		_ = out
+	}
+}
+
+// keygen without -output writes to the default path under the user config dir.
+func TestCmdKeygenDefaultPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	var out string
+	out = captureStdout(t, func() {
+		if code := run([]string{"keygen"}); code != 0 {
+			t.Errorf("exit = %d, want 0", code)
+		}
+	})
+	key := filepath.Join(home, ".config", "cloud-email-archive", "key.txt")
+	if _, err := os.Stat(key); err != nil {
+		t.Fatalf("default key not written: %v (out: %q)", err, out)
+	}
+}
+
+// -account with a resolvable name must take the filtered-account path (and
+// still fail the run if the server is unreachable).
+func TestCmdSyncAccountFilterResolved(t *testing.T) {
+	env := newTestEnv(t)
+	body := fmt.Sprintf("archive_dir = %q\nkey_file = %q\nstate_file = %q\n\n[[accounts]]\nname = \"Real\"\nhost = \"127.0.0.1\"\nport = 1\nsecurity = \"none\"\nuser = \"u\"\npassword = \"p\"\n",
+		filepath.Join(env.dir, "archive"), filepath.Join(env.dir, "key.txt"), filepath.Join(env.dir, "state.json"))
+	if err := os.WriteFile(env.cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out string
+	out = captureStderr(t, func() {
+		if code := run([]string{"sync", "-account", "real", "-config", env.cfgPath}); code != 1 {
+			t.Errorf("exit = %d, want 1", code)
+		}
+	})
+	// case-insensitive resolution must have matched "Real" and taken the
+	// filtered-account path (syncAccount's own "Real: dial" prefix shows it ran)
+	if !strings.Contains(out, "Real: dial") {
+		t.Errorf("stderr = %q", out)
+	}
+}
+
+func TestLoadConfigErrorPaths(t *testing.T) {
+	t.Run("corrupt TOML", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("this is [not toml"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "parse") {
+			t.Fatalf("err = %v, want parse error", err)
+		}
+	})
+	t.Run("path is a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := loadConfig(dir); err == nil {
+			t.Fatal("want error when config path is a directory")
+		}
+	})
+}
+
+func TestReadCommandFlagErrors(t *testing.T) {
+	env := newTestEnv(t)
+	env.seed(t, "e2e", msgA)
+	for _, args := range [][]string{
+		{"verify", "-bogus", "-config", env.cfgPath},
+		{"extract", "-bogus", "-config", env.cfgPath},
+	} {
+		if code := run(args); code != 1 {
+			t.Errorf("run(%v) = %d, want 1", args, code)
+		}
+	}
 }

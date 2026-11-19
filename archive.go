@@ -27,6 +27,9 @@ import (
 type Archive struct {
 	dir string
 	id  *age.X25519Identity
+	// newWriter is the age encryption factory; a test seam so disk-full-
+	// style write failures can be injected. Always age.Encrypt in production.
+	newWriter func(io.Writer, ...age.Recipient) (io.WriteCloser, error)
 }
 
 // writeNewKey generates a fresh age identity and stores it at keyFile (0700 dir,
@@ -62,7 +65,7 @@ func loadKey(keyFile string) (*age.X25519Identity, error) {
 }
 
 func newArchive(dir string, id *age.X25519Identity) *Archive {
-	return &Archive{dir: dir, id: id}
+	return &Archive{dir: dir, id: id, newWriter: age.Encrypt}
 }
 
 func blobName(account string, raw []byte) string {
@@ -89,7 +92,7 @@ func (a *Archive) put(account string, raw []byte) (written bool, err error) {
 		return false, err
 	}
 	cleanup := func() { tmp.Close(); os.Remove(tmp.Name()) }
-	w, err := age.Encrypt(tmp, a.id.Recipient())
+	w, err := a.newWriter(tmp, a.id.Recipient())
 	if err != nil {
 		cleanup()
 		return false, err

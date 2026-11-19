@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -490,5 +491,107 @@ func TestSweepStaleTmp(t *testing.T) {
 	}
 	if err := sweepStaleTmp(filepath.Join(dir, "does-not-exist"), time.Hour); err != nil {
 		t.Errorf("missing dir must be a no-op, got %v", err)
+	}
+}
+
+// errWriter fails every Write; closeWriter fails only Close. They simulate
+// disk-full / I/O errors inside the encryption pipeline.
+type errWriter struct{ writeErr, closeErr error }
+
+func (w *errWriter) Write(p []byte) (int, error) { return 0, w.writeErr }
+func (w *errWriter) Close() error                { return w.closeErr }
+
+// put must fail cleanly (tmp removed, no partial blob) when the age pipeline
+// errors mid-write — exercised via the newWriter test seam.
+func TestPutEncryptionErrorPaths(t *testing.T) {
+	id := testID(t)
+	cases := []struct {
+		name string
+		w    *errWriter
+	}{
+		{"encrypt factory fails", nil},
+		{"write fails", &errWriter{writeErr: errors.New("disk full")}},
+		{"close fails", &errWriter{closeErr: errors.New("flush failed")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			arc := newArchive(dir, id)
+			if tc.w == nil {
+				arc.newWriter = func(io.Writer, ...age.Recipient) (io.WriteCloser, error) {
+					return nil, errors.New("no crypto for you")
+				}
+			} else {
+				w := tc.w
+				arc.newWriter = func(io.Writer, ...age.Recipient) (io.WriteCloser, error) {
+					return w, nil
+				}
+			}
+			if _, err := arc.put("a", []byte("msg")); err == nil {
+				t.Fatal("want error from broken writer seam")
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("failed put left %d entries behind, want clean dir", len(entries))
+			}
+		})
+	}
+}
+
+// sweep must surface removal failures (e.g. read-only dir).
+func TestSweepStaleTmpRemoveError(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "a_abc.age.tmp1234")
+	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) }) //nolint:errcheck
+	if err := sweepStaleTmp(dir, 24*time.Hour); err == nil {
+		t.Fatal("want error removing from read-only dir")
+	}
+}
+
+// writeNewKey must fail cleanly when the target itself is a directory
+// (WriteFile error branch).
+func TestWriteNewKeyTargetIsDir(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "key.txt")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var out string
+	out = captureStdout(t, func() {
+		if err := writeNewKey(target); err == nil {
+			t.Error("want error writing key onto a directory")
+		}
+	})
+	if out != "" {
+		t.Errorf("no output expected on failure, got %q", out)
+	}
+}
+
+// walk must surface archive-dir read errors instead of silently yielding nothing.
+func TestWalkBlobsError(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	arc := newArchive(blocker, testID(t))
+	called := false
+	if err := arc.walk("", func(msgRef) error { called = true; return nil }); err == nil {
+		t.Fatal("want error when archive dir is a file")
+	}
+	if called {
+		t.Error("callback must not run")
 	}
 }

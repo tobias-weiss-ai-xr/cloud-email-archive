@@ -340,7 +340,8 @@ func TestCmdSearchCorruptBlob(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if code := run([]string{"search", "alpha", "-config", env.cfgPath}); code != 1 {
+	// flags must precede the positional term (Go flag parsing stops there)
+	if code := run([]string{"search", "-config", env.cfgPath, "alpha"}); code != 1 {
 		t.Fatalf("exit = %d, want 1 (corrupt blob must fail search)", code)
 	}
 }
@@ -376,6 +377,22 @@ func TestCmdVerifyArchiveDirIsFile(t *testing.T) {
 	}
 
 	if code := run([]string{"verify", "-config", env.cfgPath}); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+}
+
+// extract must fail when an .eml target exists as a directory (e.g. a
+// collided sync dir) instead of silently skipping.
+func TestCmdExtractWriteFileError(t *testing.T) {
+	env := newTestEnv(t)
+	names := env.seed(t, "e2e", msgA)
+	outDir := filepath.Join(t.TempDir(), "out")
+	// .eml target = blob filename minus .age, plus .eml
+	collision := filepath.Join(outDir, "e2e", strings.TrimSuffix(names[0], ".age")+".eml")
+	if err := os.MkdirAll(collision, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"extract", "-dir", outDir, "-config", env.cfgPath}); code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"filippo.io/age"
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-imap/v2/imapserver/imapmemserver"
@@ -474,6 +476,11 @@ func TestSyncAccountFolderFailureJoined(t *testing.T) {
 		return &brokenSelectSession{SessionIMAP4rev2: s.(imapserver.SessionIMAP4rev2), fail: "Broken"}
 	})
 	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: healthy\r\n\r\nbody\r\n")
+	// Broken must EXIST on the server, otherwise selectFolders routes it to
+	// the missing-folder path and the SELECT failure never triggers
+	if err := u.Create("Broken", nil); err != nil {
+		t.Fatal(err)
+	}
 	env := syncTestEnv(t, port, "test", []string{"INBOX", "Broken"})
 	cfg := env.cfg(t)
 	st := env.state(t) // one in-memory instance; raw syncAccount never saves
@@ -489,5 +496,53 @@ func TestSyncAccountFolderFailureJoined(t *testing.T) {
 	}
 	if len(st.folder("test", "INBOX").UIDs) != 1 {
 		t.Fatal("healthy folder UIDs must be recorded despite sibling failure")
+	}
+}
+
+// A put failure mid-sync must surface as an account error (fetched-but-not-
+// stored mail must not be remembered, or the next sync would skip it).
+func TestSyncPutFailureSurfaces(t *testing.T) {
+	u, port := startMemIMAP(t, "testuser", "testpw")
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: lost\r\n\r\nbody\r\n")
+	env := syncTestEnv(t, port, "test", []string{"INBOX"})
+	cfg := env.cfg(t)
+
+	failArc := newArchive(env.dir, testID(t))
+	failArc.newWriter = func(io.Writer, ...age.Recipient) (io.WriteCloser, error) {
+		return nil, errors.New("simulated encrypt failure")
+	}
+	err := syncAccount(cfg, &cfg.Accounts[0], failArc, env.state(t), quietLog())
+	if err == nil || !strings.Contains(err.Error(), "simulated encrypt failure") {
+		t.Fatalf("want put error to fail the account, got %v", err)
+	}
+	// no tmp leftovers from the failed put
+	entries, _ := os.ReadDir(env.dir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("failed sync left %s behind", e.Name())
+		}
+	}
+}
+
+// An empty folder must sync cleanly (enumerate early-returns) and record its
+// UIDVALIDITY so later changes are detected.
+func TestSyncEmptyFolder(t *testing.T) {
+	u, port := startMemIMAP(t, "testuser", "testpw")
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: one\r\n\r\nbody\r\n")
+	if err := u.Create("Leer", nil); err != nil {
+		t.Fatal(err)
+	}
+	env := syncTestEnv(t, port, "test", []string{"INBOX", "Leer"})
+	cfg := env.cfg(t)
+	st := env.state(t)
+
+	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+		t.Fatal(err)
+	}
+	if st.folder("test", "Leer").UIDValidity == 0 {
+		t.Error("empty folder must record UIDVALIDITY")
+	}
+	if len(st.folder("test", "Leer").UIDs) != 0 {
+		t.Error("empty folder must have no UIDs")
 	}
 }

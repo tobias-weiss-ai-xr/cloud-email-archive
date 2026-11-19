@@ -130,3 +130,37 @@ func TestStateSaveMkdirAllError(t *testing.T) {
 		t.Fatal("want error when state parent is a file")
 	}
 }
+
+// save must fail when the rename target is a directory (file→dir rename fails).
+func TestStateSaveRenameError(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	if err := os.MkdirAll(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st := &State{Accounts: map[string]map[string]*FolderState{
+		"a": {"INBOX": {UIDValidity: 1, UIDs: []uint32{1}}},
+	}}
+	if err := st.save(statePath); err == nil {
+		t.Fatal("want rename error when state path is a directory")
+	}
+	// no tmp leftover
+	if _, err := os.Stat(statePath + ".tmp"); !os.IsNotExist(err) {
+		t.Error("failed save left tmp file behind")
+	}
+}
+
+// JSON with explicit null accounts must re-init the map, not nil-deref later.
+func TestLoadStateNullAccounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"accounts": null}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Accounts == nil {
+		t.Fatal("accounts map must be re-initialized")
+	}
+}
