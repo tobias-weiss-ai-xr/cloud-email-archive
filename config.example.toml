@@ -1,19 +1,21 @@
-# hesabo — example configuration
-# Copy to ~/.config/hesabo/config.toml and fill in your accounts.
+# cloud-email-archive — example configuration
+# Copy to ~/.config/cloud-email-archive/config.toml and fill in your accounts.
 #
-#   archive_dir  where encrypted blobs live — put this INSIDE a synced folder
-#                (e.g. ~/Nextcloud/email-archive). The cloud provider only ever
-#                sees opaque .age files; content and names are encrypted.
+#   archive_dir  where encrypted blobs live — put this INSIDE a folder that is
+#                synced or mounted to your cloud: Nextcloud, Syncthing, Dropbox,
+#                OneDrive, Google Drive, a Seafile library, an SMB/NFS share, or
+#                an rclone mount (e.g. ~/Nextcloud/email-archive). The provider
+#                only ever sees opaque .age files; content and names stay hidden.
 #   key_file     age secret key — MUST stay OUTSIDE the synced folder.
-#                Generate with: hesabo keygen
+#                Generate with: cloud-email-archive keygen
 #   state_file   fetch bookkeeping (plaintext UIDs only, no mail content).
 #
 # Accounts as a list — each account type (Dovecot, Exchange, ...) is optional,
 # add as many as you like. IMAP only; Exchange needs an app password if MFA is on.
 
 archive_dir = "~/Nextcloud/email-archive"
-key_file = "~/.config/hesabo/key.txt"
-state_file = "~/.config/hesabo/state.json"
+key_file = "~/.config/cloud-email-archive/key.txt"
+state_file = "~/.config/cloud-email-archive/state.json"
 
 # --- example: faculty Dovecot ---
 [[accounts]]

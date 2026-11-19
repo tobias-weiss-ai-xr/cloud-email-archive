@@ -1,4 +1,4 @@
-module hesabo
+module github.com/tobias-weiss-ai-xr/cloud-email-archive
 
 go 1.25.0
 

@@ -57,7 +57,7 @@ func TestSyncAccountIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// --- hesabo config pointing at the fake server ---
+	// --- cloud-email-archive config pointing at the fake server ---
 	dir := t.TempDir()
 	id, err := loadKey(writeKeyFor(t))
 	if err != nil {

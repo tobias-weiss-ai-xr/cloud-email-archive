@@ -1,6 +1,6 @@
 package main
 
-// Configuration for hesabo. Accounts is a generic list (0..n), so each account
+// Configuration for cloud-email-archive. Accounts is a generic list (0..n), so each account
 // type — faculty dovecot, Verwaltung Exchange, whatever — is optional and any
 // combination is supported.
 
@@ -35,9 +35,9 @@ func defaultConfig() *Config {
 	home, _ := os.UserHomeDir()
 	cfgDir, _ := os.UserConfigDir()
 	return &Config{
-		ArchiveDir: filepath.Join(home, "Nextcloud", "email-archive"),
-		KeyFile:    filepath.Join(cfgDir, "hesabo", "key.txt"),
-		StateFile:  filepath.Join(cfgDir, "hesabo", "state.json"),
+		ArchiveDir: filepath.Join(home, "cloud-email-archive"),
+		KeyFile:    filepath.Join(cfgDir, "cloud-email-archive", "key.txt"),
+		StateFile:  filepath.Join(cfgDir, "cloud-email-archive", "state.json"),
 	}
 }
 

@@ -1,10 +1,10 @@
-# arc42 – hesabo (verschlüsseltes E-Mail-Archiv)
+# arc42 – cloud-email-archive (verschlüsseltes E-Mail-Archiv)
 
 arc42-Template: https://arc42.org
 
 | Metadatum | Wert |
 |---|---|
-| Autor | pi / hesabo |
+| Autor | pi / cloud-email-archive |
 | Stand | 2026 |
 | Version | 0.1.0 |
 | Status | Implementierung abgeschlossen, erste Produktion offen |
@@ -17,9 +17,11 @@ arc42-Template: https://arc42.org
 
 Ein verschlüsseltes E-Mail-Archiv persönlicher Postfächer (Universität/Fakultät:
 Dovecot-IMAP; Verwaltung: Exchange-IMAP), abgelegt in einem Cloud-synchronisierten
-Ordner (next.hessenbox über den Nextcloud-Desktop-Client). Voraussetzungen:
+Ordner — beliebiger Provider mit Sync-Client oder Mount: Nextcloud, Syncthing,
+Dropbox, OneDrive, Google Drive, Seafile, SMB/NFS-Share, rclone-Mount; im Projekt-
+fallback konkret: next.hessenbox per Nextcloud-Desktop-Client). Voraussetzungen:
 
-- Provider (Nextcloud-Instanz) darf **keinen Klartext** sehen (kein Inhalt, keine
+- Provider (egal welcher) darf **keinen Klartext** sehen (kein Inhalt, keine
   Betreffzeilen, keine Absender, keine Ordnerstruktur, keine sprechenden Dateinamen).
 - Lauffähig **überall** ohne installierte Runtime (ein statisches Binary), keine
   Betriebssystem-Integration (kein FUSE), keine Skript-Abhängigkeiten.
@@ -41,7 +43,7 @@ Ordner (next.hessenbox über den Nextcloud-Desktop-Client). Voraussetzungen:
 |---|---|
 | Nutzer (Hochschulbeschäftigter) | Privatsphäre, einfache Bedienung, Recovery |
 | Datenschutz | Keine personenbezogenen Daten beim Provider im Klartext |
-| Admin (Hessenbox) | keine unnötige Last, kein Klartext-Datenbestand |
+| Admin (Cloud-Provider) | keine unnötige Last, kein Klartext-Datenbestand |
 
 ---
 
@@ -51,7 +53,7 @@ Ordner (next.hessenbox über den Nextcloud-Desktop-Client). Voraussetzungen:
 |---|---|
 | Konnektivität | IMAP4rev1/rev2 über TLS (993 implicit, alternativ STARTTLS) |
 | Exchange | Basic-Auth oder App-Passwort; kein OAuth2 unterstützt (Randbedingung an Konto-Typ) |
-| Cloud | Dateiordner-Sync (Nextcloud Desktop), kein WebDAV-API am Binary |
+| Cloud | Dateiordner-Sync oder Mount (Nextcloud, Syncthing, Dropbox, SMB/NFS, rclone …), keine Provider-API am Binary |
 | Plattform | statisch gebautes Go-Binary, Windows/macOS/Linux |
 | Krypto | age (X25519 + ChaCha20-Poly1305), kein eigenes Kryptoprotokoll |
 | Recht | EU-DSGVO: Verschlüsselung als technische Maßnahme; Löschbarkeit → Schlüsselvernichtung |
@@ -65,14 +67,14 @@ Ordner (next.hessenbox über den Nextcloud-Desktop-Client). Voraussetzungen:
 
 ```
 ┌─────────┐  IMAP/TLS   ┌──────────────┐   Dateiebene   ┌────────────────┐
-│ IMAP-   │────────────▶│   hesabo     │ ──────────────▶│   Age-Blobs     │
+│ IMAP-   │────────────▶│   cloud-email-archive     │ ──────────────▶│   Age-Blobs     │
 │ Server  │             │   (Binary)   │                │ (im ArchiveDir)│
 │ Dovecot │             └──────────────┘                └───────┬────────┘
 │ Exchange│                                                      │ Sync des
-└─────────┘   Passwörter + Schlüssel aus                        │ NC-Clients
-              $XDG_CONFIG_HOME/hesabo (außerhalb)                ▼
+└─────────┘   Passwörter + Schlüssel aus                        │ Sync-Clients
+              $XDG_CONFIG_HOME/cloud-email-archive (außerhalb)                ▼
                                                    ┌───────────────────────┐
-                                                   │ next.hessenbox (Cloud)│
+                                                   │ Cloud (z. B. Hessenbox)│
                                                    │ = opaque .age-Dateien │
                                                    └───────────────────────┘
 ```
@@ -81,7 +83,7 @@ Ordner (next.hessenbox über den Nextcloud-Desktop-Client). Voraussetzungen:
 
 Eingänge (aktive Verbindungen): IMAP. Ausgänge: nur Dateisystem-Arbeiten im
 ArchiveDir (`archive_dir`) sowie Schreibzugriff auf `state_file`/`key_file` in
-`~/.config/hesabo`. Keine Netzwerk-Ausgänge außer IMAP.
+`~/.config/cloud-email-archive`. Keine Netzwerk-Ausgänge außer IMAP.
 
 ---
 
@@ -106,7 +108,7 @@ ein Vollbeweis der Archiv-Integrität — keine separate Checksummen-Tabelle nö
 ## 5. Bausteinsicht
 
 ```
-hesabo (package main)
+cloud-email-archive (package main)
  ├── main.go          CLI-Dispatch (keygen|sync|list|search|extract|verify)
  ├── config.go        TOML-Config, Defaults, Konto-Auflösung
  ├── archive.go       Age-Layer: Blobname (SHA-256), put/get/walk, Header-Parsing
@@ -135,7 +137,7 @@ atomar schreiben (tmp + rename) → UID in State → State speichern.
 
 Nebenläufigkeit: Konten sequenziell; ein Konto wird nie parallel abgefragt
 (IMAP-Verbindungen sind pro Konto serialisiert). Schreibe-I/O in den Sync-Ordner
-nur durch den NC-Client selbst.
+nur durch den Sync-Client selbst.
 
 **Lese-Kommandos (list/search/extract):** Blobs auflisten → entschlüsseln →
 Header bzw. Volltext auswerten → ausgeben. `verify`: jeden Blob entschlüsseln,
@@ -145,8 +147,8 @@ Fehler zählen, Exit-Code != 0 bei Korruption.
 
 ## 7. Verteilungs-/Deploymentsicht
 
-- Distribution: eine ausführbare Datei `hesabo` (GOOS/GOARCH-kombinierbar).
-- Deployment: in `$HOME/hesabo` ablegen, Config nach `~/.config/hesabo/config.toml`.
+- Distribution: eine ausführbare Datei `cloud-email-archive` (GOOS/GOARCH-kombinierbar).
+- Deployment: in `$HOME/cloud-email-archive` ablegen, Config nach `~/.config/cloud-email-archive/config.toml`.
 - Automatisierung: Cron (täglich `sync`, monatlich `verify`). Kein Daemon nötig.
 - Wiederherstellung: Binary + Config + Schlüssel auf neuem Rechner → `extract`.
 
@@ -221,7 +223,7 @@ Szenarien (umgesetzt):
 | go-imap v2 ist Beta (API v2.0.0-beta.9) | mittel | Fixversion gepinnt in go.mod; API isoliert in sync.go |
 | Exchange ohne Basic-Auth (nur OAuth2) | mittel | App-Passwort dokumentiert; falls Datenklasse-Zugriff über dedicated mailbox |
 | Größen-Leak bei sehr großen Anhängen | niedrig | gewollter Trade-off; optionales `size`-Padding als Zukunftsthema |
-| Sync-Race mit NC-Client (gleiche Datei gleichzeitig) | niedrig | atomare tmp+rename schreibt konsistente Blobs; NC synct nach Abschluss |
+| Sync-Race mit dem Sync-Client (gleiche Datei gleichzeitig) | niedrig | atomare tmp+rename schreibt konsistente Blobs; der Client synct nach Abschluss |
 
 ---
 
@@ -234,4 +236,4 @@ Szenarien (umgesetzt):
 | Content-Addressing | Dateiname = kryptografischer Hash des Inhalts |
 | UID / UIDVALIDITY | IMAP-Konzepte zur stabilen Identifikation von Nachrichten/Postfächern |
 | append-only | Archiv erweitert sich nur; nichts wird gelöscht |
-| next.hessenbox | Hochschul-Nextcloud-Instanz (Provider) |
+| next.hessenbox | Hochschul-Nextcloud-Instanz — konkreter Beispiel-Provider |

@@ -4,7 +4,7 @@ package main
 //
 // One file per message: <account>_<sha256 of raw message>.age
 // Content-addressing gives dedup for free (identical bytes → same filename,
-// already present → skipped) and opaque filenames for the Nextcloud provider.
+// already present → skipped) and opaque filenames for the storage provider.
 // Decryption is authenticated (age AEAD): any corruption fails with an error,
 // which is what `verify` relies on.
 
@@ -51,7 +51,7 @@ func writeNewKey(keyFile string) error {
 func loadKey(keyFile string) (*age.X25519Identity, error) {
 	data, err := os.ReadFile(keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("read key %s: %w (run `hesabo keygen` first)", keyFile, err)
+		return nil, fmt.Errorf("read key %s: %w (run `cloud-email-archive keygen` first)", keyFile, err)
 	}
 	id, err := age.ParseX25519Identity(strings.TrimSpace(string(data)))
 	if err != nil {

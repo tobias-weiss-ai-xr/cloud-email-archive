@@ -1,6 +1,6 @@
 package main
 
-// hesabo — encrypted email archive on next.hessenbox (or any synced folder).
+// cloud-email-archive — encrypted email archive on next.hessenbox (or any synced folder).
 // Single static binary: fetch (IMAP) + encrypt (age) + archive, cross-platform.
 
 import (
@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const usageText = `hesabo — encrypted email archive synced to a cloud folder
+const usageText = `cloud-email-archive — encrypted email archive synced to a cloud folder
 
 Commands:
   keygen              generate a new age key (run once)
@@ -24,10 +24,10 @@ Commands:
   verify              decrypt-check every blob in the archive
   version
 
-Config:  $HESABO_CONFIG or ~/.config/hesabo/config.toml
-Key:     ~/.config/hesabo/key.txt  (never put inside the synced folder)
+Config:  $CLOUD_EMAIL_ARCHIVE_CONFIG or ~/.config/cloud-email-archive/config.toml
+Key:     ~/.config/cloud-email-archive/key.txt  (never put inside the synced folder)
 
-Run "hesabo <cmd> -h" for command-specific flags.
+Run "cloud-email-archive <cmd> -h" for command-specific flags.
 `
 
 func main() {
@@ -51,7 +51,7 @@ func main() {
 	case "verify":
 		err = cmdVerify(os.Args[2:])
 	case "version":
-		fmt.Println("hesabo 0.1.0")
+		fmt.Println("cloud-email-archive 0.1.0")
 	case "-h", "help":
 		fmt.Print(usageText)
 	default:
@@ -78,7 +78,7 @@ func loadCfgEnv(fs *flag.FlagSet, args []string) (*cmdEnv, error) {
 		return nil, err
 	}
 	if *cfgPath == "" {
-		*cfgPath = getenvDefault("HESABO_CONFIG", defaultConfigPath())
+		*cfgPath = getenvDefault("CLOUD_EMAIL_ARCHIVE_CONFIG", defaultConfigPath())
 	}
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
@@ -134,7 +134,7 @@ func cmdSync(args []string, log *slog.Logger) error {
 
 func cmdKeygen(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
-	out := fs.String("output", "", "key file (default ~/.config/hesabo/key.txt)")
+	out := fs.String("output", "", "key file (default ~/.config/cloud-email-archive/key.txt)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -166,9 +166,9 @@ func defaultStatePath() string {
 func userCfgDir() string {
 	cfgDir, err := os.UserConfigDir()
 	if err != nil {
-		return "hesabo"
+		return "cloud-email-archive"
 	}
-	return filepath.Join(cfgDir, "hesabo")
+	return filepath.Join(cfgDir, "cloud-email-archive")
 }
 
 func openArchive(cfg *Config) (*Archive, error) {
