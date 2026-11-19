@@ -23,8 +23,10 @@ names. No content, no subject lines, no senders, no folder structure. Content
 addressing (filename = SHA-256 of the plaintext) makes deduplication pay off:
 identical mails (e.g. in several folders or accounts) are stored once, and a
 re-run only fetches mails that don't exist yet — incremental, like a backup
-tool. Data is protected against corruption: age is authenticated, any
-modification shows up in `verify`.
+tool. Data is protected two ways: age is authenticated, any
+modification shows up in `verify` — and verify also checks the
+content-addressing guarantee itself (filename must equal the SHA-256 of the
+decrypted mail), catching renames, copy bugs, or provider-side mangling.
 
 ## Build
 
@@ -56,7 +58,7 @@ cloud-email-archive sync    [-account NAME]         # fetch IMAP + encrypt (incr
 cloud-email-archive list    [-account NAME] [-limit 20]
 cloud-email-archive search  [-account NAME] TERM    # full-text search over decrypted mails
 cloud-email-archive extract [-dir OUT] [-account NAME]   # write decrypted .eml files
-cloud-email-archive verify  [-account NAME]         # decrypt-check every blob
+cloud-email-archive verify  [-account NAME]         # decrypt + hash-check every blob
 cloud-email-archive keygen  [-output FILE]
 ```
 

@@ -4,6 +4,7 @@ package main
 // here ever touches the network or the synced folder's plaintext.
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -46,7 +47,7 @@ func cmdSearch(args []string) error {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("search needs a term")
+		return errors.New("search needs a term")
 	}
 	term := strings.ToLower(strings.Join(fs.Args(), " "))
 	matches := 0
@@ -73,7 +74,7 @@ func cmdExtract(args []string) error {
 		return err
 	}
 	if *dir == "" {
-		return fmt.Errorf("extract needs -dir OUT")
+		return errors.New("extract needs -dir OUT")
 	}
 	n := 0
 	err = env.arc.walk(env.account, func(r msgRef) error {
@@ -111,12 +112,20 @@ func cmdVerify(args []string) error {
 			skipped++
 			continue // other account's blob: not our problem, don't decrypt
 		}
-		if _, err := env.arc.get(b.name); err != nil {
+		raw, err := env.arc.get(b.name)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "FAIL  %s: %v\n", b.name, err)
 			bad++
-		} else {
-			ok++
+			continue
 		}
+		// content-addressing guarantee: the filename must be the SHA-256 of
+		// the decrypted payload — catches renames, copy bugs, provider mangling
+		if want := blobName(accountOf(b.name), raw); want != b.name {
+			fmt.Fprintf(os.Stderr, "FAIL  %s: hash mismatch (content hashes to %s)\n", b.name, want)
+			bad++
+			continue
+		}
+		ok++
 	}
 	fmt.Printf("verify: %d ok, %d failed, %d skipped\n", ok, bad, skipped)
 	if bad > 0 {
@@ -125,7 +134,7 @@ func cmdVerify(args []string) error {
 	return nil
 }
 
-var errStop = fmt.Errorf("stop")
+var errStop = errors.New("stop")
 
 // truncate shortens s to at most n display columns (runes), appending an
 // ellipsis. Rune-safe: never splits a multi-byte character.

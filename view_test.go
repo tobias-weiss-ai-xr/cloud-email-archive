@@ -5,6 +5,7 @@ package main
 // and assert on the captured stdout/stderr.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -277,8 +278,8 @@ func TestTruncate(t *testing.T) {
 		{"exactly10!", 10, "exactly10!"},
 		{"eleven chars", 10, "eleven ch…"},
 		{"", 5, ""},
-		{"anything", 0, ""},   // n <= 0 → empty, never panics
-		{"anything", -3, ""},  //nolint:staticcheck
+		{"anything", 0, ""},            // n <= 0 → empty, never panics
+		{"anything", -3, ""},           //nolint:staticcheck
 		{"äöü äöü äöü", 8, "äöü äöü…"}, // rune-safe: umlauts are 1 column
 	}
 	for _, tt := range tests {
@@ -290,5 +291,91 @@ func TestTruncate(t *testing.T) {
 		if !utf8.ValidString(got) {
 			t.Errorf("truncate produced invalid UTF-8: %q", got)
 		}
+	}
+}
+
+// verify must catch a blob whose filename no longer matches the SHA-256 of
+// its content (renames, copy bugs, provider mangling) — the core
+// "verifiable archive" guarantee beyond mere decryptability.
+func TestCmdVerifyHashMismatch(t *testing.T) {
+	env := newTestEnv(t)
+	env.seed(t, "e2e", msgA)
+
+	blobs, _ := env.arc.blobs()
+	if len(blobs) != 1 {
+		t.Fatalf("want 1 blob, got %d", len(blobs))
+	}
+	tampered := filepath.Join(env.dir, "archive", "e2e_deadbeef00000000000000000000000000000000000000000000000000000000.age")
+	if err := os.Rename(blobs[0].path, tampered); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr string
+	stdout = captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			if code := run([]string{"verify", "-config", env.cfgPath}); code != 1 {
+				t.Errorf("exit = %d, want 1", code)
+			}
+		})
+	})
+	// FAIL lines go to stderr, the summary to stdout
+	if !strings.Contains(stderr, "hash mismatch") {
+		t.Fatalf("stderr missing hash mismatch: %q", stderr)
+	}
+	if !strings.Contains(stdout, "0 ok, 1 failed") {
+		t.Fatalf("stdout summary wrong: %q", stdout)
+	}
+}
+
+// searching an archive containing a corrupt blob must surface the error, not
+// silently skip the message.
+func TestCmdSearchCorruptBlob(t *testing.T) {
+	env := newTestEnv(t)
+	env.seed(t, "e2e", msgA, msgB)
+
+	blobs, _ := env.arc.blobs()
+	data, _ := os.ReadFile(blobs[0].path)
+	data[len(data)/2] ^= 0xFF
+	if err := os.WriteFile(blobs[0].path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := run([]string{"search", "alpha", "-config", env.cfgPath}); code != 1 {
+		t.Fatalf("exit = %d, want 1 (corrupt blob must fail search)", code)
+	}
+}
+
+// extract into a path whose parent is a file must fail with a usable error.
+func TestCmdExtractMkdirAllError(t *testing.T) {
+	env := newTestEnv(t)
+	env.seed(t, "e2e", msgA)
+
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"extract", "-dir", filepath.Join(blocker, "out"), "-config", env.cfgPath}); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+}
+
+// archive dir being a regular file must produce a clean error, not a panic
+// (regression: blobs() used to ignore the Info() error, risking a nil deref).
+func TestCmdVerifyArchiveDirIsFile(t *testing.T) {
+	env := newTestEnv(t)
+	env.seed(t, "e2e", msgA)
+
+	blocker := filepath.Join(env.dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("archive_dir = %q\nkey_file = %q\nstate_file = %q\n",
+		blocker, filepath.Join(env.dir, "key.txt"), filepath.Join(env.dir, "state.json"))
+	if err := os.WriteFile(env.cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := run([]string{"verify", "-config", env.cfgPath}); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
 	}
 }

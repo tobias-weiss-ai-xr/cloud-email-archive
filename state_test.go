@@ -106,3 +106,27 @@ func TestStateFolderAccessorLazy(t *testing.T) {
 		t.Fatal("folder() must register the folder lazily")
 	}
 }
+
+// A state path that is a directory must surface a read error (not be treated
+// as "no state yet").
+func TestLoadStatePathIsDir(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := loadState(dir); err == nil {
+		t.Fatal("want error when state path is a directory")
+	}
+}
+
+// save must fail cleanly when the state file's parent cannot be created.
+func TestStateSaveMkdirAllError(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := &State{Accounts: map[string]map[string]*FolderState{
+		"a": {"INBOX": {UIDValidity: 1, UIDs: []uint32{5, 1}}},
+	}}
+	if err := st.save(filepath.Join(blocker, "sub", "state.json")); err == nil {
+		t.Fatal("want error when state parent is a file")
+	}
+}

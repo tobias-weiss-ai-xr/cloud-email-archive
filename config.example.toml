@@ -27,6 +27,7 @@ user = "weissto"                        # TODO
 password = "hunter2"                    # plaintext in config; or use password_cmd
 # password_cmd = "cat ~/.config/imap-passwords/faculty"   # alternative to `password` (never store secrets in the config inside a synced folder)
 folders = ["*"]                         # "*" (default) = all, or list: ["INBOX", "Archiv"]
+                                        # a listed folder missing on the server fails the sync
 
 # --- example: Verwaltung Exchange (IMAP) ---
 [[accounts]]

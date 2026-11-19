@@ -3,8 +3,23 @@ package main
 // Unit tests for the sync plumbing that doesn't need a live IMAP server.
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"math/big"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapserver"
+	"github.com/emersion/go-imap/v2/imapserver/imapmemserver"
 )
 
 func TestAccountPassword(t *testing.T) {
@@ -30,9 +45,9 @@ func TestAccountPassword(t *testing.T) {
 			want: "direct",
 		},
 		{
-			name:    "trailing newline trimmed",
-			acc:     Account{Name: "a", PasswordCmd: "printf 'pw\\n\\r\\n'"},
-			want:    "pw",
+			name: "trailing newline trimmed",
+			acc:  Account{Name: "a", PasswordCmd: "printf 'pw\\n\\r\\n'"},
+			want: "pw",
 		},
 		{
 			name:    "neither set",
@@ -107,5 +122,72 @@ func TestWantAccount(t *testing.T) {
 	}
 	if wantAccount("faculty", "verwaltung") {
 		t.Error("different account must not match")
+	}
+}
+
+// dial() must perform a real STARTTLS upgrade against a server advertising it.
+// Self-signed cert with an IP SAN matching the dial target — real handshake,
+// real verification, no insecure shortcuts on the client side.
+func TestDialStartTLS(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the client verifies against the system pool — trust our test CA the
+	// same way a real deployment does (SSL_CERT_FILE), no InsecureSkipVerify
+	pemPath := filepath.Join(t.TempDir(), "ca.pem")
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(pemPath, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", pemPath)
+	tlsCert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+
+	mem := imapmemserver.New()
+	u := imapmemserver.NewUser("testuser", "testpw")
+	if err := u.Create("INBOX", nil); err != nil {
+		t.Fatal(err)
+	}
+	mem.AddUser(u)
+	server := imapserver.New(&imapserver.Options{
+		NewSession: func(conn *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return mem.NewSession(), nil, nil
+		},
+		InsecureAuth: true,
+		Caps: imap.CapSet{
+			imap.CapIMAP4rev1: {},
+			imap.CapIMAP4rev2: {},
+		},
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{tlsCert}},
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		server.Close()
+		ln.Close()
+	})
+	go server.Serve(ln)
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	a := &Account{Name: "t", Host: "127.0.0.1", Port: port, Security: "starttls", User: "testuser", Password: "testpw"}
+	c, err := dial(a)
+	if err != nil {
+		t.Fatalf("starttls dial failed: %v", err)
+	}
+	defer c.Close()
+	if err := c.Login(a.User, a.Password).Wait(); err != nil {
+		t.Fatalf("login over starttls failed: %v", err)
 	}
 }

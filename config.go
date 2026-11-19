@@ -90,7 +90,7 @@ func loadConfig(path string) (*Config, error) {
 			a.Security = "implicit"
 		case "starttls", "none":
 		default:
-			return nil, fmt.Errorf("account %q: invalid security %q (implicit|starttls|none)", a.Name, a.Security)
+			return nil, fmt.Errorf("config %s: account %q: invalid security %q (implicit|starttls|none)", path, a.Name, a.Security)
 		}
 	}
 	return cfg, nil

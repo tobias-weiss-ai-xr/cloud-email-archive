@@ -6,8 +6,8 @@ package main
 // removed from the archive, mirroring "never delete" archive semantics.
 
 import (
-	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -46,7 +46,11 @@ func dial(a *Account) (*imapclient.Client, error) {
 }
 
 // syncAccount fetches every configured (or all selectable) folder of one account.
-func syncAccount(ctx context.Context, cfg *Config, a *Account, arc *Archive, st *State, log *slog.Logger) error {
+// One failing folder does not abort the others, but the returned error names
+// every failure so a cron-driven sync can alert. Note: go-imap v2 beta has no
+// context-aware operations, so there is deliberately no ctx parameter — a
+// hung connection is bounded by the server's TCP timeouts.
+func syncAccount(cfg *Config, a *Account, arc *Archive, st *State, log *slog.Logger) error {
 	pw, err := accountPassword(a)
 	if err != nil {
 		return err
@@ -64,21 +68,30 @@ func syncAccount(ctx context.Context, cfg *Config, a *Account, arc *Archive, st 
 	}
 	log.Info("connected", "account", a.Name, "host", a.Host)
 
-	folders, err := selectFolders(ctx, c, a)
+	folders, missing, err := selectFolders(c, a, log)
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, folder := range folders {
-		if err := syncFolder(ctx, c, a, folder, arc, st, log); err != nil {
+		if err := syncFolder(c, a, folder, arc, st, log); err != nil {
 			log.Error("folder sync failed", "account", a.Name, "folder", folder, "err", err)
+			errs = append(errs, fmt.Errorf("account %s, folder %s: %w", a.Name, folder, err))
 		}
 	}
-	return nil
+	// a configured folder that vanished from the server is a misconfiguration
+	// (renamed/deleted mailbox) — syncing silently nothing would hide it
+	for _, m := range missing {
+		log.Error("configured folder not found", "account", a.Name, "folder", m)
+		errs = append(errs, fmt.Errorf("account %s: configured folder %q not found on server", a.Name, m))
+	}
+	return errors.Join(errs...)
 }
 
 // selectFolders returns the folder names to archive: the configured list, or
-// all selectable folders when the config says "*" or lists nothing.
-func selectFolders(ctx context.Context, c *imapclient.Client, a *Account) ([]string, error) {
+// all selectable folders when the config says "*" or lists nothing. Configured
+// folders missing on the server are reported as missing (caller decides).
+func selectFolders(c *imapclient.Client, a *Account, log *slog.Logger) (found, missing []string, err error) {
 	want := a.Folders
 	all := false
 	for _, f := range want {
@@ -110,28 +123,28 @@ func selectFolders(ctx context.Context, c *imapclient.Client, a *Account) ([]str
 		available = append(available, ld.Mailbox)
 	}
 	if err := scmd.Close(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if all {
-		return available, nil
+		return available, nil, nil
 	}
 	lower := map[string]bool{}
 	for _, f := range available {
 		lower[strings.ToLower(f)] = true
 	}
-	var out []string
 	for _, f := range want {
 		if lower[strings.ToLower(f)] {
-			out = append(out, f)
+			found = append(found, f)
 		} else {
-			slog.Warn("folder not found on server", "account", a.Name, "folder", f)
+			log.Warn("folder not found on server", "account", a.Name, "folder", f)
+			missing = append(missing, f)
 		}
 	}
-	return out, nil
+	return found, missing, nil
 }
 
-func syncFolder(ctx context.Context, c *imapclient.Client, a *Account, folder string, arc *Archive, st *State, log *slog.Logger) error {
+func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, st *State, log *slog.Logger) error {
 	sel, err := c.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait()
 	if err != nil {
 		return fmt.Errorf("select %q: %w", folder, err)

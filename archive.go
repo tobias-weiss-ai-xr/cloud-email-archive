@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,7 +22,6 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"net/mail"
 )
 
 type Archive struct {
@@ -70,12 +70,10 @@ func blobName(account string, raw []byte) string {
 	return account + "_" + hex.EncodeToString(sum[:]) + ".age"
 }
 
-func blobPath(dir, name string) string { return filepath.Join(dir, name) }
-
 // put stores msg under content-addressed name; returns true if newly written.
 func (a *Archive) put(account string, raw []byte) (written bool, err error) {
 	name := blobName(account, raw)
-	p := blobPath(a.dir, name)
+	p := filepath.Join(a.dir, name)
 	if _, err := os.Stat(p); err == nil {
 		return false, nil // already archived
 	} else if !os.IsNotExist(err) {
@@ -119,6 +117,36 @@ func (a *Archive) put(account string, raw []byte) (written bool, err error) {
 	return true, nil
 }
 
+// sweepStaleTmp removes leftover temp files from crashed writes. Only files
+// untouched for longer than olderThan are removed, so a concurrent sync run
+// on another machine (writing its in-progress blob right now) is never
+// disturbed.
+func sweepStaleTmp(dir string, olderThan time.Duration) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cutoff := time.Now().Add(-olderThan)
+	for _, e := range entries {
+		if e.IsDir() || !strings.Contains(e.Name(), ".tmp") {
+			continue // real blobs are <account>_<hash>.age — never contain .tmp
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // get decrypts a single blob from the archive into the raw message.
 func (a *Archive) get(name string) ([]byte, error) {
 	f, err := os.Open(filepath.Join(a.dir, name))
@@ -153,7 +181,10 @@ func (a *Archive) blobs() ([]blob, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".age") {
 			continue
 		}
-		info, _ := e.Info()
+		info, err := e.Info()
+		if err != nil {
+			return nil, fmt.Errorf("stat %s: %w", e.Name(), err)
+		}
 		out = append(out, blob{name: e.Name(), path: filepath.Join(a.dir, e.Name()), size: info.Size()})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
@@ -206,8 +237,12 @@ type msgRef struct {
 // Unix epoch.
 func parseHeaders(raw []byte) (date time.Time, from, subject string) {
 	date = time.Unix(0, 0)
-	// normalize any line ending to CRLF
-	crlf := bytes.ReplaceAll(bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")), []byte("\n"), []byte("\r\n"))
+	// normalize any line ending to CRLF (CRLF, bare LF, and bare CR — hostile
+	// or legacy input — all become the same canonical form, so a raw control
+	// character can never survive into a header value)
+	lf := bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
+	lf = bytes.ReplaceAll(lf, []byte("\r"), []byte("\n"))
+	crlf := bytes.ReplaceAll(lf, []byte("\n"), []byte("\r\n"))
 	idx := bytes.Index(crlf, []byte("\r\n\r\n"))
 	if idx < 0 {
 		return
@@ -228,7 +263,7 @@ func parseHeaders(raw []byte) (date time.Time, from, subject string) {
 			continue
 		}
 		key := strings.ToLower(strings.TrimSpace(string(line[:colon])))
-		val := strings.TrimSpace(string(line[colon+1:]))
+		val := stripControls(strings.TrimSpace(string(line[colon+1:])))
 		switch key {
 		case "date":
 			if date.Equal(time.Unix(0, 0)) {
@@ -247,4 +282,21 @@ func parseHeaders(raw []byte) (date time.Time, from, subject string) {
 		}
 	}
 	return
+}
+
+// stripControls removes control characters that could mangle terminal output
+// (ANSI escapes start with ESC, carriage returns overwrite lines). Tab is
+// kept: it is legitimate header whitespace and harmless to display.
+func stripControls(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }) {
+		return s // fast path: nothing to strip
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if (r >= 0x20 && r != 0x7f) || r == '\t' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

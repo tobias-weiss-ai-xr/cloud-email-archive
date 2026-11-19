@@ -7,7 +7,7 @@ package main
 
 import (
 	"bytes"
-	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -133,7 +133,7 @@ func TestSyncAccountIntegration(t *testing.T) {
 	st := env.state(t) // one state instance across all three syncs
 
 	// --- first sync: 2 blobs, decrypted content matches ---
-	if err := syncAccount(context.Background(), cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	blobs, err := env.arc.blobs()
@@ -156,7 +156,7 @@ func TestSyncAccountIntegration(t *testing.T) {
 	}
 
 	// --- second sync: nothing new → still 2 blobs ---
-	if err := syncAccount(context.Background(), cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	if blobs, _ := env.arc.blobs(); len(blobs) != 2 {
@@ -165,7 +165,7 @@ func TestSyncAccountIntegration(t *testing.T) {
 
 	// --- third sync with one new message → exactly 3 blobs ---
 	seedMail(t, u, "INBOX", "From: c@x.de\r\nSubject: drei\r\n\r\nbody drei\r\n")
-	if err := syncAccount(context.Background(), cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	if blobs, _ := env.arc.blobs(); len(blobs) != 3 {
@@ -317,7 +317,7 @@ func TestSyncSecurityNoneWarns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syncAccount(context.Background(), cfg, &cfg.Accounts[0], env.arc, st, log); err != nil {
+	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, log); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "security=none") {
@@ -351,7 +351,7 @@ func TestSyncWrongPassword(t *testing.T) {
 
 	cfg := env.cfg(t)
 	st := env.state(t)
-	err = syncAccount(context.Background(), cfg, &cfg.Accounts[0], env.arc, st, quietLog())
+	err = syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog())
 	if err == nil || !strings.Contains(err.Error(), "login") {
 		t.Fatalf("want login error, got %v", err)
 	}
@@ -370,7 +370,7 @@ func TestSyncUIDValidityReset(t *testing.T) {
 	cfg := env.cfg(t)
 	st := env.state(t) // one in-memory state across both syncs
 
-	if err := syncAccount(context.Background(), cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	fs := st.folder("test", "INBOX")
@@ -385,7 +385,7 @@ func TestSyncUIDValidityReset(t *testing.T) {
 	}
 
 	// re-sync: clean re-fetch, no error, state healed back to the real UIDValidity
-	if err := syncAccount(context.Background(), cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	healed := st.folder("test", "INBOX")
@@ -398,5 +398,96 @@ func TestSyncUIDValidityReset(t *testing.T) {
 	// append-only: the reset refetch dedups against existing blobs
 	if blobs, _ := env.arc.blobs(); len(blobs) != 1 {
 		t.Fatalf("reset re-fetch must dedup, got %d blobs", len(blobs))
+	}
+}
+
+// startMemIMAPHook starts the in-memory IMAP server with a session decorator,
+// letting tests inject selective failures (e.g. SELECT of one folder).
+func startMemIMAPHook(t *testing.T, user, pass string, hook func(imapserver.Session) imapserver.Session) (*imapmemserver.User, int) {
+	t.Helper()
+	mem := imapmemserver.New()
+	u := imapmemserver.NewUser(user, pass)
+	if err := u.Create("INBOX", nil); err != nil {
+		t.Fatal(err)
+	}
+	mem.AddUser(u)
+	server := imapserver.New(&imapserver.Options{
+		NewSession: func(conn *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return hook(mem.NewSession()), nil, nil
+		},
+		InsecureAuth: true,
+		Caps: imap.CapSet{
+			imap.CapIMAP4rev1: {},
+			imap.CapIMAP4rev2: {},
+		},
+	})
+	ln, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		server.Close()
+		ln.Close()
+	})
+	go server.Serve(ln)
+	return u, ln.Addr().(*net.TCPAddr).Port
+}
+
+// A configured folder that is not on the server must fail the sync (and must
+// not silently archive nothing) — it means the mailbox was renamed or deleted.
+func TestSyncAccountMissingFolderErrors(t *testing.T) {
+	u, port := startMemIMAP(t, "testuser", "testpw")
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: present\r\n\r\nbody\r\n")
+	env := syncTestEnv(t, port, "test", []string{"Ghost"})
+	cfg := env.cfg(t)
+
+	err := syncAccount(cfg, &cfg.Accounts[0], env.arc, env.state(t), quietLog())
+	if err == nil || !strings.Contains(err.Error(), "Ghost") || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("want missing-folder error, got %v", err)
+	}
+	// the present-but-unconfigured INBOX must NOT have been synced
+	if blobs, _ := env.arc.blobs(); len(blobs) != 0 {
+		t.Fatalf("unconfigured INBOX must not be archived, got %d blobs", len(blobs))
+	}
+}
+
+// brokenSelectSession fails SELECT for one specific folder, simulating a
+// server-side error, while everything else behaves normally.
+type brokenSelectSession struct {
+	// embed the full rev2 capability set so the server's interface
+	// assertions keep passing; only Select is overridden
+	imapserver.SessionIMAP4rev2
+	fail string
+}
+
+func (s *brokenSelectSession) Select(mailbox string, options *imap.SelectOptions) (*imap.SelectData, error) {
+	if mailbox == s.fail {
+		return nil, errors.New("simulated select failure")
+	}
+	return s.SessionIMAP4rev2.Select(mailbox, options)
+}
+
+// One broken folder must not abort the healthy folder's sync, but must fail
+// the account (joined error) so cron alerting sees it.
+func TestSyncAccountFolderFailureJoined(t *testing.T) {
+	u, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &brokenSelectSession{SessionIMAP4rev2: s.(imapserver.SessionIMAP4rev2), fail: "Broken"}
+	})
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: healthy\r\n\r\nbody\r\n")
+	env := syncTestEnv(t, port, "test", []string{"INBOX", "Broken"})
+	cfg := env.cfg(t)
+	st := env.state(t) // one in-memory instance; raw syncAccount never saves
+
+	err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog())
+	if err == nil || !strings.Contains(err.Error(), "Broken") {
+		t.Fatalf("want joined folder-failure error naming Broken, got %v", err)
+	}
+	// the healthy INBOX must still have been archived despite Broken failing
+	blobs, _ := env.arc.blobs()
+	if len(blobs) != 1 {
+		t.Fatalf("healthy folder must still sync, got %d blobs", len(blobs))
+	}
+	if len(st.folder("test", "INBOX").UIDs) != 1 {
+		t.Fatal("healthy folder UIDs must be recorded despite sibling failure")
 	}
 }

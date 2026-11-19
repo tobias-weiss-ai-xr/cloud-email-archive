@@ -145,9 +145,9 @@ func TestAccountOf(t *testing.T) {
 		{"faculty_abc123.age", "faculty"},
 		{"uni_mail_abc123.age", "uni_mail"}, // underscore inside account name
 		{"a_b_c_abc123.age", "a_b_c"},
-		{"abc123.age", ""},    // no separator
-		{"_abc123.age", ""},   // empty account
-		{"plain.age", ""},     // no separator at all
+		{"abc123.age", ""},  // no separator
+		{"_abc123.age", ""}, // empty account
+		{"plain.age", ""},   // no separator at all
 	}
 	for _, tt := range tests {
 		if got := accountOf(tt.blob); got != tt.want {
@@ -424,5 +424,71 @@ func TestWriteNewKeyOverwrite(t *testing.T) {
 	rec2 = id2.Recipient()
 	if rec1.String() == rec2.String() {
 		t.Fatal("overwritten key must be a fresh identity")
+	}
+}
+
+// put must fail cleanly (no tmp leftovers) when the archive dir cannot be
+// created or written.
+func TestPutErrorPaths(t *testing.T) {
+	id := testID(t)
+
+	t.Run("dir path is a file", func(t *testing.T) {
+		blocker := filepath.Join(t.TempDir(), "blocker")
+		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		arc := newArchive(filepath.Join(blocker, "sub"), id)
+		if _, err := arc.put("a", []byte("msg")); err == nil {
+			t.Fatal("want MkdirAll error when archive dir parent is a file")
+		}
+	})
+	t.Run("unwritable dir", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(dir, 0o700) }) //nolint:errcheck — allow t.Cleanup to undo
+		arc := newArchive(filepath.Join(dir, "arch"), id)
+		if _, err := arc.put("a", []byte("msg")); err == nil {
+			t.Fatal("want error from read-only dir")
+		}
+		// no leftover tmp files on the failed write
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if strings.Contains(e.Name(), ".tmp") {
+				t.Fatalf("failed put left %s behind", e.Name())
+			}
+		}
+	})
+}
+
+func TestSweepStaleTmp(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "a_abc.age.tmp1234")
+	fresh := filepath.Join(dir, "b_def.age.tmp5678")
+	blob := filepath.Join(dir, "c_ghi.age")
+	for _, p := range []string{stale, fresh, blob} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweepStaleTmp(dir, 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("stale tmp must be removed")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Error("fresh tmp (possible concurrent writer) must be kept")
+	}
+	if _, err := os.Stat(blob); err != nil {
+		t.Error("real blob must be kept")
+	}
+	if err := sweepStaleTmp(filepath.Join(dir, "does-not-exist"), time.Hour); err != nil {
+		t.Errorf("missing dir must be a no-op, got %v", err)
 	}
 }

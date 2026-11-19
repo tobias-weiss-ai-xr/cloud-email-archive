@@ -4,7 +4,6 @@ package main
 // Single static binary: fetch (IMAP) + encrypt (age) + archive, cross-platform.
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const usageText = `cloud-email-archive — encrypted email archive synced to a cloud folder
@@ -132,17 +132,22 @@ func cmdSync(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
+	// leftovers from crashed runs pollute the synced folder forever — clean
+	// up ones old enough that no concurrent writer can still be using them
+	if err := sweepStaleTmp(cfg.ArchiveDir, 24*time.Hour); err != nil {
+		log.Warn("could not sweep stale tmp files", "dir", cfg.ArchiveDir, "err", err)
+	}
 	// one failed account must not mask the others, but it must fail the run
 	var errs []error
 	for i := range cfg.Accounts {
-		if err := syncAccount(ctx, cfg, &cfg.Accounts[i], arc, st, log); err != nil {
+		if err := syncAccount(cfg, &cfg.Accounts[i], arc, st, log); err != nil {
 			log.Error("sync failed", "account", cfg.Accounts[i].Name, "err", err)
 			errs = append(errs, fmt.Errorf("account %s: %w", cfg.Accounts[i].Name, err))
 		}
 	}
 	if err := st.save(cfg.StateFile); err != nil {
-		return fmt.Errorf("save state: %w", err)
+		// join, don't return early — account errors must still surface
+		errs = append(errs, fmt.Errorf("save state: %w", err))
 	}
 	log.Info("sync done", "archive", cfg.ArchiveDir)
 	return errors.Join(errs...)
