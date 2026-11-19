@@ -135,7 +135,7 @@ func TestSyncAccountIntegration(t *testing.T) {
 	st := env.state(t) // one state instance across all three syncs
 
 	// --- first sync: 2 blobs, decrypted content matches ---
-	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	blobs, err := env.arc.blobs()
@@ -158,7 +158,7 @@ func TestSyncAccountIntegration(t *testing.T) {
 	}
 
 	// --- second sync: nothing new → still 2 blobs ---
-	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	if blobs, _ := env.arc.blobs(); len(blobs) != 2 {
@@ -167,7 +167,7 @@ func TestSyncAccountIntegration(t *testing.T) {
 
 	// --- third sync with one new message → exactly 3 blobs ---
 	seedMail(t, u, "INBOX", "From: c@x.de\r\nSubject: drei\r\n\r\nbody drei\r\n")
-	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	if blobs, _ := env.arc.blobs(); len(blobs) != 3 {
@@ -319,7 +319,7 @@ func TestSyncSecurityNoneWarns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, log); err != nil {
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, log); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "security=none") {
@@ -353,7 +353,7 @@ func TestSyncWrongPassword(t *testing.T) {
 
 	cfg := env.cfg(t)
 	st := env.state(t)
-	err = syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog())
+	_, err = syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog())
 	if err == nil || !strings.Contains(err.Error(), "login") {
 		t.Fatalf("want login error, got %v", err)
 	}
@@ -372,7 +372,7 @@ func TestSyncUIDValidityReset(t *testing.T) {
 	cfg := env.cfg(t)
 	st := env.state(t) // one in-memory state across both syncs
 
-	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	fs := st.folder("test", "INBOX")
@@ -387,7 +387,7 @@ func TestSyncUIDValidityReset(t *testing.T) {
 	}
 
 	// re-sync: clean re-fetch, no error, state healed back to the real UIDValidity
-	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	healed := st.folder("test", "INBOX")
@@ -443,7 +443,7 @@ func TestSyncAccountMissingFolderErrors(t *testing.T) {
 	env := syncTestEnv(t, port, "test", []string{"Ghost"})
 	cfg := env.cfg(t)
 
-	err := syncAccount(cfg, &cfg.Accounts[0], env.arc, env.state(t), quietLog())
+	_, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, env.state(t), quietLog())
 	if err == nil || !strings.Contains(err.Error(), "Ghost") || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("want missing-folder error, got %v", err)
 	}
@@ -485,7 +485,7 @@ func TestSyncAccountFolderFailureJoined(t *testing.T) {
 	cfg := env.cfg(t)
 	st := env.state(t) // one in-memory instance; raw syncAccount never saves
 
-	err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog())
+	_, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog())
 	if err == nil || !strings.Contains(err.Error(), "Broken") {
 		t.Fatalf("want joined folder-failure error naming Broken, got %v", err)
 	}
@@ -511,7 +511,7 @@ func TestSyncPutFailureSurfaces(t *testing.T) {
 	failArc.newWriter = func(io.Writer, ...age.Recipient) (io.WriteCloser, error) {
 		return nil, errors.New("simulated encrypt failure")
 	}
-	err := syncAccount(cfg, &cfg.Accounts[0], failArc, env.state(t), quietLog())
+	_, err := syncAccount(cfg, &cfg.Accounts[0], failArc, env.state(t), quietLog())
 	if err == nil || !strings.Contains(err.Error(), "simulated encrypt failure") {
 		t.Fatalf("want put error to fail the account, got %v", err)
 	}
@@ -536,7 +536,7 @@ func TestSyncEmptyFolder(t *testing.T) {
 	cfg := env.cfg(t)
 	st := env.state(t)
 
-	if err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
+	if _, err := syncAccount(cfg, &cfg.Accounts[0], env.arc, st, quietLog()); err != nil {
 		t.Fatal(err)
 	}
 	if st.folder("test", "Leer").UIDValidity == 0 {

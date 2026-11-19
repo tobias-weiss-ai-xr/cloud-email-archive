@@ -37,6 +37,9 @@ func cmdList(args []string) error {
 	if err == errStop {
 		err = nil
 	}
+	if err == nil && count == 0 {
+		fmt.Println("(no messages in archive)")
+	}
 	return err
 }
 
@@ -53,6 +56,11 @@ func cmdSearch(args []string) error {
 	term := strings.ToLower(strings.Join(fs.Args(), " "))
 	term = strings.ReplaceAll(term, "\r", "")
 
+	// trigram lookups need ≥3 characters; shorter terms silently exhaustively
+	// scan the archive, so say why it is slow
+	if !*rawScan && len(term) < 3 {
+		fmt.Fprintf(os.Stderr, "term shorter than 3 characters; using exhaustive raw scan\n")
+	}
 	if !*rawScan && len(term) >= 3 {
 		matches, err := searchIndexed(env, term)
 		if err == nil {
@@ -87,11 +95,27 @@ func cmdIndex(args []string) error {
 	if err != nil {
 		return err
 	}
-	segs, err := ensureIndex(env.arc)
+	// freshness probe: if some segment's coverage hash already matches the
+	// current blob set, there is nothing to do — say so instead of implying
+	// a rebuild took place
+	blobs, err := env.arc.blobs()
 	if err != nil {
 		return err
 	}
-	blobs, err := env.arc.blobs()
+	names := make([]string, len(blobs))
+	for i, b := range blobs {
+		names[i] = b.name
+	}
+	want := coverageHash(names)
+	if segs, _ := listSegments(env.arc); len(segs) > 0 {
+		for _, sn := range segs {
+			if h, err := segmentCoverageHash(env.arc, sn); err == nil && h == want {
+				fmt.Printf("index: up to date (%d blob(s), %d segment(s))\n", len(blobs), len(segs))
+				return nil
+			}
+		}
+	}
+	segs, err := ensureIndex(env.arc)
 	if err != nil {
 		return err
 	}

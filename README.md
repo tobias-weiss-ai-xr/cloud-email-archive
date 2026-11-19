@@ -34,6 +34,9 @@ decrypted mail), catching renames, copy bugs, or provider-side mangling.
 go build -o cloud-email-archive .   # single binary, cross-compilable (linux/darwin/windows)
 ```
 
+Prebuilt linux/darwin binaries (amd64/arm64) with SHA256SUMS are published on
+GitHub Releases for every `v*` tag.
+
 ## Setup (once)
 
 ```sh
@@ -104,6 +107,10 @@ crontab -e
 # monthly integrity check:
 @monthly $HOME/cloud-email-archive verify >> "$HOME/cea-verify.log" 2>&1
 ```
+
+A `sync` run logs a final summary line (`sync done` with new messages/bytes),
+one error line per failing account/folder, and exits non-zero if any account
+failed — alert on the exit code, not on log noise.
 
 ## Principles
 

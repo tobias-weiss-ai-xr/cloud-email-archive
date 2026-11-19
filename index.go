@@ -304,6 +304,9 @@ func loadSegment(a *Archive, name string) (*idxSegment, error) {
 func listSegments(a *Archive) ([]string, error) {
 	entries, err := os.ReadDir(a.dir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // fresh install: archive dir is created on first sync
+		}
 		return nil, err
 	}
 	var out []string

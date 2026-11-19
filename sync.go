@@ -19,6 +19,9 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 )
 
+// accountPassword resolves the IMAP credential: explicit password wins,
+// otherwise password_cmd is executed (sh) and trimmed of trailing newlines.
+// Setting both is a misconfiguration — loadConfig rejects it.
 func accountPassword(a *Account) (string, error) {
 	if a.Password != "" {
 		return a.Password, nil
@@ -32,6 +35,9 @@ func accountPassword(a *Account) (string, error) {
 	}
 	return "", fmt.Errorf("account %q: neither password nor password_cmd set", a.Name)
 }
+
+// dial opens the IMAP connection per the account's security setting:
+// implicit TLS (default), STARTTLS, or none (warned about by syncAccount).
 func dial(a *Account) (*imapclient.Client, error) {
 	addr := net.JoinHostPort(a.Host, fmt.Sprint(a.Port))
 	opts := &imapclient.Options{TLSConfig: &tls.Config{ServerName: a.Host, MinVersion: tls.VersionTLS12}}
@@ -45,23 +51,29 @@ func dial(a *Account) (*imapclient.Client, error) {
 	}
 }
 
+// syncStats aggregates what one sync added to the archive.
+type syncStats struct {
+	messages int64
+	bytes    int64
+}
+
 // syncAccount fetches every configured (or all selectable) folder of one account.
 // One failing folder does not abort the others, but the returned error names
 // every failure so a cron-driven sync can alert. Note: go-imap v2 beta has no
 // context-aware operations, so there is deliberately no ctx parameter — a
 // hung connection is bounded by the server's TCP timeouts.
-func syncAccount(cfg *Config, a *Account, arc *Archive, st *State, log *slog.Logger) error {
+func syncAccount(cfg *Config, a *Account, arc *Archive, st *State, log *slog.Logger) (syncStats, error) {
 	pw, err := accountPassword(a)
 	if err != nil {
-		return err
+		return syncStats{}, err
 	}
 	c, err := dial(a)
 	if err != nil {
-		return fmt.Errorf("%s: dial: %w", a.Name, err)
+		return syncStats{}, fmt.Errorf("%s: dial: %w", a.Name, err)
 	}
 	defer c.Close()
 	if err := c.Login(a.User, pw).Wait(); err != nil {
-		return fmt.Errorf("%s: login: %w", a.Name, err)
+		return syncStats{}, fmt.Errorf("%s: login: %w", a.Name, err)
 	}
 	if a.Security == "none" {
 		log.Warn("account uses security=none (plaintext IMAP)", "account", a.Name)
@@ -70,11 +82,14 @@ func syncAccount(cfg *Config, a *Account, arc *Archive, st *State, log *slog.Log
 
 	folders, missing, err := selectFolders(c, a, log)
 	if err != nil {
-		return err
+		return syncStats{}, err
 	}
 	var errs []error
+	var total syncStats
 	for _, folder := range folders {
-		if err := syncFolder(c, a, folder, arc, st, log); err != nil {
+		s, err := syncFolder(c, a, folder, arc, st, log)
+		total.add(s)
+		if err != nil {
 			log.Error("folder sync failed", "account", a.Name, "folder", folder, "err", err)
 			errs = append(errs, fmt.Errorf("account %s, folder %s: %w", a.Name, folder, err))
 		}
@@ -85,7 +100,12 @@ func syncAccount(cfg *Config, a *Account, arc *Archive, st *State, log *slog.Log
 		log.Error("configured folder not found", "account", a.Name, "folder", m)
 		errs = append(errs, fmt.Errorf("account %s: configured folder %q not found on server", a.Name, m))
 	}
-	return errors.Join(errs...)
+	return total, errors.Join(errs...)
+}
+
+func (s *syncStats) add(o syncStats) {
+	s.messages += o.messages
+	s.bytes += o.bytes
 }
 
 // selectFolders returns the folder names to archive: the configured list, or
@@ -144,10 +164,10 @@ func selectFolders(c *imapclient.Client, a *Account, log *slog.Logger) (found, m
 	return found, missing, nil
 }
 
-func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, st *State, log *slog.Logger) error {
+func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, st *State, log *slog.Logger) (syncStats, error) {
 	sel, err := c.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait()
 	if err != nil {
-		return fmt.Errorf("select %q: %w", folder, err)
+		return syncStats{}, fmt.Errorf("select %q: %w", folder, err)
 	}
 	fs := st.folder(a.Name, folder)
 	if fs.UIDValidity != 0 && fs.UIDValidity != sel.UIDValidity {
@@ -159,7 +179,7 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 
 	present, err := enumerateUIDs(c, sel.NumMessages)
 	if err != nil {
-		return fmt.Errorf("enumerate %q: %w", folder, err)
+		return syncStats{}, fmt.Errorf("enumerate %q: %w", folder, err)
 	}
 
 	have := make(map[uint32]bool, len(fs.UIDs))
@@ -174,16 +194,16 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 	}
 	if len(todo) == 0 {
 		log.Debug("up to date", "account", a.Name, "folder", folder, "count", len(present))
-		return nil
+		return syncStats{}, nil
 	}
 	log.Info("fetching new", "account", a.Name, "folder", folder, "new", len(todo), "total", len(present))
 
-	fetched, err := fetchAndArchive(c, a, folder, arc, todo, log)
+	fetched, s, err := fetchAndArchive(c, a, folder, arc, todo, log)
 	if err != nil {
-		return err
+		return s, err
 	}
 	fs.UIDs = append(fs.UIDs, fetched...)
-	return nil
+	return s, nil
 }
 
 // enumerateUIDs returns all message UIDs currently in the selected mailbox.
@@ -215,7 +235,9 @@ func enumerateUIDs(c *imapclient.Client, numMessages uint32) ([]imap.UID, error)
 }
 
 // fetchAndArchive streams BODY[] for the given UIDs and stores new messages.
-func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archive, todo []imap.UID, log *slog.Logger) ([]uint32, error) {
+// Returned stats count only newly written blobs; dedup hits fetch the bytes
+// but add nothing.
+func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archive, todo []imap.UID, log *slog.Logger) ([]uint32, syncStats, error) {
 	uidSet := imap.UIDSetNum(todo...)
 	cmd := c.Fetch(uidSet, &imap.FetchOptions{
 		UID:         true,
@@ -224,8 +246,8 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 	defer cmd.Close()
 
 	var fetched []uint32
-	var totalAdd, totalNew int64
-	archived := 0
+	var s syncStats
+	var totalAdd int64
 	for {
 		msg := cmd.Next()
 		if msg == nil {
@@ -245,7 +267,7 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 				if item.Literal != nil {
 					b, err := io.ReadAll(item.Literal)
 					if err != nil {
-						return fetched, err
+						return fetched, s, err
 					}
 					body = b
 				}
@@ -262,20 +284,20 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 		totalAdd += int64(len(body))
 		written, err := arc.put(a.Name, body)
 		if err != nil {
-			return fetched, err
+			return fetched, s, err
 		}
 		if written {
-			archived++
-			totalNew += int64(len(body))
+			s.messages++
+			s.bytes += int64(len(body))
 		}
 		fetched = append(fetched, uint32(uid))
 	}
 	if err := cmd.Close(); err != nil {
-		return fetched, err
+		return fetched, s, err
 	}
-	log.Info("stored", "account", a.Name, "folder", folder, "new_messages", archived,
-		"new_bytes", bytesCount(totalNew), "raw_bytes", bytesCount(totalAdd), "uids_remembered", len(fetched))
-	return fetched, nil
+	log.Info("stored", "account", a.Name, "folder", folder, "new_messages", s.messages,
+		"new_bytes", bytesCount(s.bytes), "raw_bytes", bytesCount(totalAdd), "uids_remembered", len(fetched))
+	return fetched, s, nil
 }
 
 func bytesCount(n int64) string {

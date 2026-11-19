@@ -146,8 +146,11 @@ func cmdSync(args []string, log *slog.Logger) error {
 	}
 	// one failed account must not mask the others, but it must fail the run
 	var errs []error
+	var total syncStats
 	for i := range cfg.Accounts {
-		if err := syncAccount(cfg, &cfg.Accounts[i], arc, st, log); err != nil {
+		s, err := syncAccount(cfg, &cfg.Accounts[i], arc, st, log)
+		total.add(s)
+		if err != nil {
 			log.Error("sync failed", "account", cfg.Accounts[i].Name, "err", err)
 			errs = append(errs, fmt.Errorf("account %s: %w", cfg.Accounts[i].Name, err))
 		}
@@ -160,7 +163,8 @@ func cmdSync(args []string, log *slog.Logger) error {
 	if _, err := ensureIndex(arc); err != nil {
 		log.Warn("index update failed; search falls back to raw scan", "err", err)
 	}
-	log.Info("sync done", "archive", cfg.ArchiveDir)
+	log.Info("sync done", "archive", cfg.ArchiveDir,
+		"new_messages", total.messages, "new_bytes", bytesCount(total.bytes))
 	return errors.Join(errs...)
 }
 

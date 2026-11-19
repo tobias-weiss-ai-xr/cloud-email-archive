@@ -24,8 +24,9 @@ host = "imap.example.edu"               # your IMAP server
 port = 993
 security = "implicit"                   # implicit TLS on 993 (default) | starttls | none
 user = "your-imap-user"
-password = "app-password"               # plaintext in config; or use password_cmd
-# password_cmd = "cat ~/.config/imap-passwords/faculty"   # alternative to `password` (never store secrets in the config inside a synced folder)
+password = "app-password"               # plaintext in config...
+# password_cmd = "cat ~/.config/imap-passwords/faculty"   # ...or read it from a secret store instead.
+                                        # Set only ONE of password / password_cmd — having both is a config error.
 folders = ["*"]                         # "*" (default) = all, or list: ["INBOX", "Archiv"]
                                         # a listed folder missing on the server fails the sync
 

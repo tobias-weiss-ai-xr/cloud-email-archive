@@ -170,3 +170,27 @@ func TestFindAccount(t *testing.T) {
 		t.Errorf("empty name must yield nil,nil, got: %v %v", acc, err)
 	}
 }
+
+func TestLoadConfigRejectsBothPasswordForms(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	content := `
+archive_dir = "%s"
+key_file = "%s"
+state_file = "%s"
+[[accounts]]
+name = "x"
+host = "h"
+user = "u"
+password = "a"
+password_cmd = "echo b"
+`
+	content = fmt.Sprintf(content,
+		filepath.Join(dir, "archive"), filepath.Join(dir, "key.txt"), filepath.Join(dir, "state.json"))
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(cfgPath); err == nil || !strings.Contains(err.Error(), "only one of password") {
+		t.Fatalf("want both-set rejection, got %v", err)
+	}
+}

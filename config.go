@@ -78,6 +78,9 @@ func loadConfig(path string) (*Config, error) {
 		if a.User == "" {
 			return nil, fmt.Errorf("config %s: account %q: user is required", path, a.Name)
 		}
+		if a.Password != "" && a.PasswordCmd != "" {
+			return nil, fmt.Errorf("config %s: account %q: set only one of password / password_cmd", path, a.Name)
+		}
 		if a.Port == 0 {
 			a.Port = 993
 		}

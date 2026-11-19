@@ -396,3 +396,107 @@ func TestCmdExtractWriteFileError(t *testing.T) {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 }
+
+// A second index run must report "up to date" instead of implying a rebuild.
+func TestCmdIndexUpToDate(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureIndex(env.arc); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := cmdIndex([]string{"-config", env.cfgPath}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "up to date") {
+		t.Fatalf("want up-to-date report, got %q", out)
+	}
+	// after a new blob it must report coverage again
+	if _, err := env.arc.put("acc", []byte("Subject: two\r\n\r\nbeta")); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t, func() {
+		if err := cmdIndex([]string{"-config", env.cfgPath}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "2 blob(s) covered") {
+		t.Fatalf("want coverage report, got %q", out)
+	}
+}
+
+// A term shorter than 3 characters explains why the raw scan runs.
+func TestCmdSearchShortTermHint(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha beta")); err != nil {
+		t.Fatal(err)
+	}
+	errOut := captureStderr(t, func() {
+		out := captureStdout(t, func() {
+			if err := cmdSearch([]string{"-config", env.cfgPath, "ha"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if !strings.Contains(out, "1 match(es)") {
+			t.Fatalf("raw scan result missing: %q", out)
+		}
+	})
+	if !strings.Contains(errOut, "shorter than 3 characters") { // "ha" matches "alpha"
+		t.Fatalf("want short-term hint on stderr, got %q", errOut)
+	}
+}
+
+// list on an empty archive must not print nothing at all.
+func TestCmdListEmptyArchiveHint(t *testing.T) {
+	env := newTestEnv(t)
+	quietLog()
+	out := captureStdout(t, func() {
+		if err := cmdList([]string{"-config", env.cfgPath}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "(no messages in archive)") {
+		t.Fatalf("want empty-archive hint, got %q", out)
+	}
+}
+
+// Fresh install (archive dir not yet created): index/list/search must degrade
+// gracefully instead of surfacing raw "no such file" errors.
+func TestFreshArchiveDirDegradation(t *testing.T) {
+	env := newTestEnvWithConfig(t, "")
+	os.RemoveAll(filepath.Join(env.dir, "archive")) // config exists, dir does not
+	out := captureStdout(t, func() {
+		if err := cmdIndex([]string{"-config", env.cfgPath}); err != nil {
+			t.Fatalf("index on fresh install failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "0 blob(s) covered, 0 segment(s)") {
+		t.Fatalf("index: %q", out)
+	}
+	out = captureStdout(t, func() {
+		if err := cmdList([]string{"-config", env.cfgPath}); err != nil {
+			t.Fatalf("list on fresh install failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "(no messages in archive)") {
+		t.Fatalf("list: %q", out)
+	}
+	errOut := captureStderr(t, func() {
+		out := captureStdout(t, func() {
+			if err := cmdSearch([]string{"-config", env.cfgPath, "anything"}); err != nil {
+				t.Fatalf("search on fresh install failed: %v", err)
+			}
+		})
+		if !strings.Contains(out, "0 match(es)") {
+			t.Fatalf("search: %q", out)
+		}
+	})
+	if strings.Contains(errOut, "no such file") {
+		t.Fatalf("search must fall back quietly on fresh install, stderr: %q", errOut)
+	}
+}
