@@ -1083,11 +1083,13 @@ func TestSyncBeforeBadDateRejected(t *testing.T) {
 	var code int
 	var stderr string
 	captureStdout(t, func() {
-		captureStderr(t, func() {
+		stderr = captureStderr(t, func() {
 			code = run([]string{"sync", "-config", env.cfgPath, "-before", "01.01.2025"})
 		})
 	})
-	_ = stderr
+	if !strings.Contains(stderr, "want YYYY-MM-DD") {
+		t.Fatalf("bad-date rejection must name the expected format, got stderr: %q", stderr)
+	}
 	if code == 0 {
 		t.Fatal("sync -before 01.01.2025 must be rejected (want YYYY-MM-DD)")
 	}
@@ -1124,7 +1126,15 @@ func TestExpireRequiresBefore(t *testing.T) {
 
 func TestExpireDryRunDoesNotDelete(t *testing.T) {
 	env, u, _ := expireFixture(t)
-	if code := runExpire(t, env.cfgPath, "-before", "2025-01-01"); code != 0 {
+	var stdout string
+	var code int
+	stdout = captureStdout(t, func() {
+		code = run([]string{"expire", "-config", env.cfgPath, "-before", "2025-01-01"})
+	})
+	if !strings.Contains(stdout, "dry run: test/INBOX: would delete 2 of 2 in-scope message(s)") {
+		t.Fatalf("dry run stdout contract broken, got: %q", stdout)
+	}
+	if code != 0 {
 		t.Fatalf("expire dry run exit = %d", code)
 	}
 	if got := serverMessages(t, u, "INBOX"); got != 3 {
@@ -1224,6 +1234,33 @@ func TestExpireBadConfigRejected(t *testing.T) {
 	})
 	if code == 0 {
 		t.Fatal("expire with missing config must fail")
+	}
+}
+
+// A configured folder that is not selectable on the server must fail the
+// expire run (same misconfiguration rule as sync), not be silently skipped.
+func TestExpireMissingConfiguredFolderRejected(t *testing.T) {
+	quietLog()
+	env, u, _ := expireFixture(t)
+	cfg := env.cfg(t)
+	cfg.Accounts[0].Folders = []string{"INBOX", "Ghost"}
+	p := filepath.Join(env.dir, "ghost.toml")
+	writeTestConfig(t, p, cfg)
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"expire", "-config", p, "-before", "2025-01-01"})
+		})
+	})
+	if code == 0 {
+		t.Fatal("expire with a configured-but-missing folder must exit non-zero")
+	}
+	if !strings.Contains(stderr, `configured folder "Ghost" not found`) {
+		t.Fatalf("stderr must name the missing folder, got: %q", stderr)
+	}
+	if got := serverMessages(t, u, "INBOX"); got != 3 {
+		t.Fatalf("misconfigured run deleted mail: %d left", got)
 	}
 }
 
@@ -1444,7 +1481,7 @@ func writeTestConfig(t *testing.T, path string, cfg *Config) {
 // UID EXPUNGE (the messages stay until the expunge actually happened).
 func TestExpireServerCommandFaults(t *testing.T) {
 	quietLog()
-	var listErr, selectErr, storeErr, expungeErr atomic.Bool
+	var listErr, selectErr, fetchErr, storeErr, expungeErr atomic.Bool
 	u, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
 		return &hookSession{
 			Session: s,
@@ -1459,6 +1496,14 @@ func TestExpireServerCommandFaults(t *testing.T) {
 					return nil, errors.New("select fault")
 				}
 				return s.Select(mailbox, options)
+			},
+			fetch: func(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+				if fetchErr.Load() {
+					// session returns an error -> server replies tagged NO ->
+					// the client's FetchCommand surfaces it via Close()
+					return errors.New("fetch fault")
+				}
+				return s.Fetch(w, numSet, options)
 			},
 			store: func(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, options *imap.StoreOptions) error {
 				if storeErr.Load() {
@@ -1490,6 +1535,7 @@ func TestExpireServerCommandFaults(t *testing.T) {
 	// fault branch is the same trivial error propagation as select's)
 	toggles := []toggle{
 		{"list", listErr.Store}, {"select", selectErr.Store},
+		{"fetch (proof command tagged NO)", fetchErr.Store},
 		{"store", storeErr.Store}, {"expunge", expungeErr.Store},
 	}
 	for _, tg := range toggles {
@@ -1584,4 +1630,74 @@ func TestExpireStateSaveFault(t *testing.T) {
 	if got := serverMessages(t, u, "INBOX"); got != 1 {
 		t.Fatalf("server has %d message(s), want 1 (deletions stand despite save failure)", got)
 	}
+}
+
+// deleteServerSide mimics another client expunging mail: it opens its own
+// IMAP session and UID-expunges the given UIDs.
+func deleteServerSide(t *testing.T, port int, user, pass, mailbox string, uids ...imap.UID) {
+	t.Helper()
+	c, err := imapclient.DialInsecure(fmt.Sprintf("localhost:%d", port), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close() //nolint:errcheck — test helper
+	if err := c.Login(user, pass).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Select(mailbox, nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	set := imap.UIDSetNum(uids...)
+	if err := c.Store(set, &imap.StoreFlags{
+		Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted},
+	}, nil).Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UIDExpunge(set).Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Full sync must prune remembered UIDs of messages that vanished from the
+// server (other-client expunge, or a crash between expire's UID EXPUNGE and
+// the state save) — otherwise expire re-considers ghosts forever. A -before
+// sync must NOT prune: its present set is partial, so "not present" there
+// just means "after the cutoff".
+func TestSyncPrunesVanishedUIDsFromState(t *testing.T) {
+	quietLog()
+	env, u, port := expireFixture(t) // 3 messages, all synced
+	st := env.state(t)
+	if got := len(st.Accounts["test"]["INBOX"].UIDs); got != 3 {
+		t.Fatalf("fixture synced %d UID(s), want 3", got)
+	}
+
+	// another client deletes the two old messages server-side
+	deleteServerSide(t, port, "testuser", "testpw", "INBOX", 1, 2)
+	if got := serverMessages(t, u, "INBOX"); got != 1 {
+		t.Fatalf("server-side delete failed: %d left, want 1", got)
+	}
+
+	// -before sync: nothing before the cutoff remains; state must be intact
+	var code int
+	captureStdout(t, func() {
+		code = run([]string{"sync", "-config", env.cfgPath, "-before", "2025-01-01"})
+	})
+	if code != 0 {
+		t.Fatalf("sync -before exit = %d", code)
+	}
+	st = env.state(t)
+	if got := len(st.Accounts["test"]["INBOX"].UIDs); got != 3 {
+		t.Fatalf("-before sync pruned state: %d UID(s), want 3", got)
+	}
+
+	// full sync: the vanished UIDs are provably gone -> pruned
+	if code := runSync(t, env.cfgPath); code != 0 {
+		t.Fatalf("sync exit = %d", code)
+	}
+	st = env.state(t)
+	if got := len(st.Accounts["test"]["INBOX"].UIDs); got != 1 {
+		t.Fatalf("full sync did not prune vanished UIDs: %d UID(s), want 1", got)
+	}
+	// the archived blobs are untouched (append-only)
+	assertBlobCount(t, env.arc, 3)
 }

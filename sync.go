@@ -194,13 +194,33 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 
 	have := make(map[uint32]bool, len(fs.UIDs))
 	for _, u := range fs.UIDs {
-		have[u] = true
+		have[uint32(u)] = true
 	}
 	var todo []imap.UID
 	for _, uid := range present {
 		if !have[uint32(uid)] {
 			todo = append(todo, uid)
 		}
+	}
+	if before == nil {
+		// full enumeration sees every message on the server: any remembered
+		// UID that is not present was expunged elsewhere (other client, or a
+		// crash between expire's UID EXPUNGE and the state save) — drop it
+		// from state so expire never re-considers it. The blob stays; the
+		// archive is append-only. Never prune on a -before sync: there the
+		// present set is partial, and "not present" just means "after the
+		// cutoff".
+		presentSet := make(map[uint32]bool, len(present))
+		for _, uid := range present {
+			presentSet[uint32(uid)] = true
+		}
+		keep := fs.UIDs[:0]
+		for _, u := range fs.UIDs {
+			if presentSet[uint32(u)] {
+				keep = append(keep, u)
+			}
+		}
+		fs.UIDs = keep
 	}
 	if len(todo) == 0 {
 		log.Debug("up to date", "account", a.Name, "folder", folder, "count", len(present))
@@ -216,7 +236,6 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 	return s, nil
 }
 
-// enumerateUIDs returns all message UIDs currently in the selected mailbox.
 // searchUIDsBefore returns the UIDs of all messages whose INTERNALDATE is
 // before cutoff (server-side UID SEARCH BEFORE — date-only, exclusive). This
 // is the date-scoped alternative to enumerateUIDs for "archive old mail".
@@ -239,6 +258,7 @@ func searchUIDsBefore(c *imapclient.Client, cutoff time.Time) ([]imap.UID, error
 	return uids, nil
 }
 
+// enumerateUIDs returns all message UIDs currently in the selected mailbox.
 func enumerateUIDs(c *imapclient.Client, numMessages uint32) ([]imap.UID, error) {
 	if numMessages == 0 {
 		return nil, nil

@@ -93,9 +93,11 @@ message when *all* of this holds:
 
 Without `-do` the command is a dry run. Without `-before` it refuses to run.
 Deletion is UID-scoped (`UID STORE \Deleted` + `UID EXPUNGE`), so it touches
-exactly the proven set and nothing else. `sync` afterwards is a clean no-op:
-the remaining server mail is already in the archive, and the archive keeps
-everything — including what was just deleted server-side.
+exactly the proven set and nothing else — note that `UID EXPUNGE` needs the
+server's UIDPLUS capability (Dovecot, Courier, most others have it). A full
+`sync` afterwards is a clean no-op: the remaining server mail is already in
+the archive, and the archive keeps everything — including what was just
+deleted server-side.
 
 ## Search speed
 

@@ -46,9 +46,8 @@ func parseDateArg(s string) (time.Time, error) {
 
 // proof is one message the archive demonstrably holds.
 type proof struct {
-	uid      imap.UID
-	size     int64
-	internal time.Time
+	uid  imap.UID
+	size int64
 }
 
 // cmdExpire implements `expire`: report (dry-run) or perform server-side
@@ -130,27 +129,34 @@ func expireAccount(cfg *Config, a *Account, arc *Archive, st *State, cutoff time
 	if err := c.Login(a.User, pw).Wait(); err != nil {
 		return 0, 0, fmt.Errorf("%s: login: %w", a.Name, err)
 	}
-	folders, _, err := selectFolders(c, a, log)
+	folders, missing, err := selectFolders(c, a, log)
 	if err != nil {
 		return 0, 0, err
 	}
+	var errs []error
 	var total int64
 	var bytes int64
 	for _, folder := range folders {
 		n, b, err := expireFolder(c, a, folder, arc, st, cutoff, doIt, log)
-		if err != nil {
-			return total, bytes, fmt.Errorf("expire %q: %w", folder, err)
-		}
 		total += n
 		bytes += b
+		if err != nil {
+			log.Error("folder expire failed", "account", a.Name, "folder", folder, "err", err)
+			errs = append(errs, fmt.Errorf("account %s, folder %s: %w", a.Name, folder, err))
+		}
 	}
-	return total, bytes, nil
+	// same misconfiguration rule as sync: a configured folder that vanished
+	// from the server must not be silently skipped
+	for _, m := range missing {
+		errs = append(errs, fmt.Errorf("account %s: configured folder %q not found on server", a.Name, m))
+	}
+	return total, bytes, errors.Join(errs...)
 }
 
 // expireFolder proves and (when doIt) deletes one folder's in-scope mail.
 func expireFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, st *State, cutoff time.Time, doIt bool, log *slog.Logger) (int64, int64, error) {
-	// survey read-only; once we actually delete, the connection needs write
-	// access, so re-select without ReadOnly
+	// survey in read-only mode; only an actual deletion needs write access,
+	// so the select is writable iff -do was given
 	sel, err := c.Select(folder, &imap.SelectOptions{ReadOnly: !doIt}).Wait()
 	if err != nil {
 		return 0, 0, fmt.Errorf("select: %w", err)
@@ -208,6 +214,7 @@ func expireFolder(c *imapclient.Client, a *Account, folder string, arc *Archive,
 		provedUIDs[i] = p.uid
 		bytes += p.size
 	}
+
 	if !doIt {
 		fmt.Printf("dry run: %s/%s: would delete %d of %d in-scope message(s) (%s)\n",
 			a.Name, folder, len(proved), len(cands), bytesCount(bytes))
@@ -232,6 +239,8 @@ func expireFolder(c *imapclient.Client, a *Account, folder string, arc *Archive,
 		}
 	}
 	fs.UIDs = keep
+	fmt.Printf("deleted: %s/%s: deleted %d of %d in-scope message(s) (%s)\n",
+		a.Name, folder, len(proved), len(cands), bytesCount(bytes))
 	log.Info("expired", "account", a.Name, "folder", folder, "deleted", len(proved),
 		"bytes", bytesCount(bytes), "kept", len(fs.UIDs))
 	return int64(len(proved)), bytes, nil
@@ -306,7 +315,12 @@ func proveHoldings(c *imapclient.Client, a *Account, folder string, arc *Archive
 				"folder", folder, "uid", uid)
 			continue
 		}
-		proved = append(proved, proof{uid: uid, size: int64(len(body)), internal: internal})
+		proved = append(proved, proof{uid: uid, size: int64(len(body))})
+	}
+	// a tagged NO on the proof fetch means some candidates were never seen —
+	// fail the run like sync does (they were skipped above, nothing deleted)
+	if err := cmd.Close(); err != nil {
+		return nil, err
 	}
 	return proved, nil
 }
