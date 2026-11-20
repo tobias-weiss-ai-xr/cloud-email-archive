@@ -67,6 +67,12 @@ func cmdExpire(args []string, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("-before: %w", err)
 	}
+	// single-writer: concurrent expire/sync runs would clobber the state file
+	lock, err := lockInstance(env.cfg.StateFile)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 	cfg, arc := env.cfg, env.arc
 	if env.account != "" {
 		acc, err := findAccount(cfg, env.account)

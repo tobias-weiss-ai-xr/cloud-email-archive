@@ -143,6 +143,12 @@ A `sync` run logs a final summary line (`sync done` with new messages/bytes),
 one error line per failing account/folder, and exits non-zero if any account
 failed — alert on the exit code, not on log noise.
 
+Only one state-mutating command (`sync`, `expire`, `index`) may run per
+profile at a time; the others refuse with
+`another cloud-email-archive instance is running` while one is active
+(advisory lock on `<state-file>.lock`, auto-released on exit). `view` and
+`verify` are read-only and lock-free.
+
 ## Principles
 
 - **Append-only:** nothing is ever deleted. Even if a mail disappears from the
@@ -171,3 +177,18 @@ another machine: drop binary + `config.toml` + `key.txt`, run
 - Encryption: [`filippo.io/age`](https://age-encryption.org/v1) (X25519/ChaCha20-Poly1305, audited)
 - Config: TOML
 - Further architecture decisions: see `docs/arc42/`
+
+## Testing
+
+The suite runs against an in-memory IMAP server (`go test ./...`), plus two
+opt-in tiers:
+
+```sh
+# real-server tier: full sync→verify→expire flow against Dovecot in Docker
+# (exercises foreign UIDPLUS / SEARCH BEFORE / INTERNALDATE implementations)
+go test -tags integration -run TestDovecot -v
+
+# true-binary E2E: builds the binary and drives it via exec
+# (runs as part of the normal suite)
+go test -run TestE2EBinary -v
+```

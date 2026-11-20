@@ -36,3 +36,17 @@ jobs:
 
       - name: Coverage
         run: go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
+
+  integration:
+    # real-server tier against Dovecot in Docker (foreign UIDPLUS/SEARCH/
+    # INTERNALDATE implementations); opt-in locally via -tags integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Dovecot integration
+        run: go test -tags integration -count=1 -timeout 600s -run TestDovecot -v ./...

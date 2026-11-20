@@ -133,6 +133,12 @@ func cmdSync(args []string, log *slog.Logger) error {
 		}
 		before = &t
 	}
+	// single-writer: concurrent syncs would clobber each other's state file
+	lock, err := lockInstance(env.cfg.StateFile)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 	cfg, arc := env.cfg, env.arc
 	if env.account != "" {
 		// sync requires a configured account (read commands don't)

@@ -214,18 +214,44 @@ func TestCmdSyncErrorBranches(t *testing.T) {
 			t.Errorf("stderr = %q", out)
 		}
 	})
-	t.Run("unwritable state dir joins save error", func(t *testing.T) {
+	t.Run("state save failure fails the run", func(t *testing.T) {
 		// account sync succeeds (server unreachable is NOT an error here: use
-		// an empty-folder account config) but the state dir is read-only →
-		// the save error must fail the run with a "save state" message
+		// an empty-folder account config) but the state file cannot be
+		// written — state.json is a DIRECTORY (EISDIR), while the lock file
+		// next to it stays creatable — so the save error must fail the run
+		// with a "save state" message
 		env := newTestEnv(t)
 		body := fmt.Sprintf("archive_dir = %q\nkey_file = %q\nstate_file = %q\n\n[[accounts]]\nname = \"ok\"\nhost = \"127.0.0.1\"\nport = 1\nsecurity = \"none\"\nuser = \"u\"\npassword = \"p\"\nfolders = []\n",
 			filepath.Join(env.dir, "archive"), filepath.Join(env.dir, "key.txt"), filepath.Join(env.dir, "statedir", "state.json"))
 		if err := os.WriteFile(env.cfgPath, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		// make the parent of state_file unwritable AFTER mkdirall'd by loadState?
-		// no — save() does MkdirAll itself; make the grandparent read-only
+		statedir := filepath.Join(env.dir, "statedir")
+		// save() writes state.json.tmp then renames — a directory at the
+		// tmp path makes the write fail EISDIR while load/lock stay intact
+		if err := os.MkdirAll(filepath.Join(statedir, "state.json.tmp"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		var out string
+		out = captureStderr(t, func() {
+			if code := run([]string{"sync", "-config", env.cfgPath}); code != 1 {
+				t.Errorf("exit = %d, want 1", code)
+			}
+		})
+		if !strings.Contains(out, "save state") {
+			t.Errorf("stderr = %q", out)
+		}
+	})
+	t.Run("unwritable state dir fails at lock acquisition", func(t *testing.T) {
+		// the single-writer lock lives next to the state file; a read-only
+		// state dir must fail the run up front with the lock error, not
+		// somewhere mid-sync
+		env := newTestEnv(t)
+		body := fmt.Sprintf("archive_dir = %q\nkey_file = %q\nstate_file = %q\n\n[[accounts]]\nname = \"ok\"\nhost = \"127.0.0.1\"\nport = 1\nsecurity = \"none\"\nuser = \"u\"\npassword = \"p\"\nfolders = []\n",
+			filepath.Join(env.dir, "archive"), filepath.Join(env.dir, "key.txt"), filepath.Join(env.dir, "statedir", "state.json"))
+		if err := os.WriteFile(env.cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		statedir := filepath.Join(env.dir, "statedir")
 		if err := os.MkdirAll(statedir, 0o700); err != nil {
 			t.Fatal(err)
@@ -240,7 +266,7 @@ func TestCmdSyncErrorBranches(t *testing.T) {
 				t.Errorf("exit = %d, want 1", code)
 			}
 		})
-		if !strings.Contains(out, "save state") {
+		if !strings.Contains(out, "open lock") {
 			t.Errorf("stderr = %q", out)
 		}
 	})

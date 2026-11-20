@@ -95,6 +95,12 @@ func cmdIndex(args []string) error {
 	if err != nil {
 		return err
 	}
+	// single-writer: index rewrites the same segments a running sync writes
+	lock, err := lockInstance(env.cfg.StateFile)
+	if err != nil {
+		return err
+	}
+	defer lock.release()
 	// freshness probe: if some segment's coverage hash already matches the
 	// current blob set, there is nothing to do — say so instead of implying
 	// a rebuild took place
