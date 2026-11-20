@@ -6,6 +6,7 @@ package main
 // re-sync via state and the CLI command around it.
 
 import (
+	"bufio"
 	"sync/atomic"
 
 	"bytes"
@@ -1700,4 +1701,210 @@ func TestSyncPrunesVanishedUIDsFromState(t *testing.T) {
 	}
 	// the archived blobs are untouched (append-only)
 	assertBlobCount(t, env.arc, 3)
+}
+
+// rawReply is a scripted wire reply: exactly the bytes to write, and whether
+// to drop the connection right after (needed for truncated literals — the
+// client's literal reader blocks until the promised size or the socket dies).
+type rawReply struct {
+	raw  string
+	drop bool
+}
+
+// startRawScriptIMAP serves just enough scripted IMAP to reach a UID SEARCH:
+// greeting, LOGIN, LIST, SELECT/EXAMINE are answered correctly; `search`
+// decides the UID SEARCH reply, `fetch` (when non-nil) the FETCH reply.
+// Anything else gets a plain tagged OK. This is the injection point for
+// server-side SEARCH faults, which the in-memory session hook cannot express.
+func startRawScriptIMAP(t *testing.T, search func(tag string) rawReply, fetch func(tag string) rawReply) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveRawScriptIMAP(c, search, fetch)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// seedRawState writes an expire-ready state matching the raw script server
+// (UIDVALIDITY 42): both UIDs are remembered as archived.
+func seedRawState(t *testing.T, env *testEnv) {
+	t.Helper()
+	st := `{"accounts":{"test":{"INBOX":{"uidvalidity":42,"uids":[1,2]}}}}`
+	if err := os.WriteFile(env.cfg(t).StateFile, []byte(st), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serveRawScriptIMAP(c net.Conn, search, fetch func(tag string) rawReply) {
+	defer c.Close() //nolint:errcheck
+	rd := bufio.NewReader(c)
+	c.Write([]byte("* OK ready\r\n")) //nolint:errcheck
+	for {
+		line, err := rd.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.HasSuffix(line, "+") { // literal continuation (LOGIN args) — accept
+			continue
+		}
+		sp := strings.IndexByte(line, ' ')
+		if sp <= 0 {
+			continue
+		}
+		tag, rest := line[:sp], line[sp+1:]
+		var out string
+		var drop bool
+		switch {
+		case strings.HasPrefix(rest, "LOGIN"), strings.HasPrefix(rest, "LIST"), strings.HasPrefix(rest, "CAPABILITY"):
+			if strings.HasPrefix(rest, "LIST") {
+				out = "* LIST () \"/\" \"INBOX\"\r\n"
+			}
+			out += tag + " OK done\r\n"
+		case strings.HasPrefix(rest, "SELECT"), strings.HasPrefix(rest, "EXAMINE"):
+			out = "* 3 EXISTS\r\n* OK [UIDVALIDITY 42] uids\r\n* OK [UIDNEXT 4] next\r\n" + tag + " OK selected\r\n"
+		case strings.Contains(rest, "SEARCH"):
+			r := search(tag)
+			out, drop = r.raw, r.drop
+		case strings.Contains(rest, "FETCH"):
+			if fetch != nil {
+				r := fetch(tag)
+				out, drop = r.raw, r.drop
+			} else {
+				out = "* 1 FETCH (UID 1)\r\n" + tag + " OK done\r\n"
+			}
+		default:
+			out = tag + " OK done\r\n"
+		}
+		c.Write([]byte(out)) //nolint:errcheck
+		if drop {
+			return // scripted connection drop
+		}
+	}
+}
+
+// A tagged NO on the date-scoped SEARCH must fail the sync (the -before
+// present set is unknown — proceeding would silently mis-archive).
+func TestSyncBeforeSearchTaggedNO(t *testing.T) {
+	quietLog()
+	port := startRawScriptIMAP(t,
+		func(tag string) rawReply { return rawReply{tag + " NO search refused\r\n", false} },
+		nil)
+	env := syncTestEnv(t, port, "test", []string{"INBOX"})
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"sync", "-config", env.cfgPath, "-before", "2025-01-01"})
+		})
+	})
+	if code == 0 {
+		t.Fatal("tagged NO on SEARCH was silently swallowed")
+	}
+	if !strings.Contains(stderr, "search before 2025-01-01") {
+		t.Fatalf("error must name the failed search, got: %q", stderr)
+	}
+	if blobs, _ := env.arc.blobs(); len(blobs) != 0 {
+		t.Fatalf("failed search archived data: %d blob(s)", len(blobs))
+	}
+}
+
+// Same fault in expire: an unknown present set must abort the run before any
+// proof — and nothing may be touched.
+func TestExpireSearchTaggedNO(t *testing.T) {
+	quietLog()
+	port := startRawScriptIMAP(t,
+		func(tag string) rawReply { return rawReply{tag + " NO search refused\r\n", false} },
+		nil)
+	env := syncTestEnv(t, port, "test", []string{"INBOX"})
+	seedRawState(t, env) // raw server's SELECT reports UIDVALIDITY 42
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"expire", "-config", env.cfgPath, "-before", "2025-01-01"})
+		})
+	})
+	if code == 0 {
+		t.Fatal("tagged NO on expire's SEARCH was silently swallowed")
+	}
+	if !strings.Contains(stderr, "folder INBOX: search: imap: NO search refused") {
+		t.Fatalf("error must name folder and search, got: %q", stderr)
+	}
+}
+
+// The proof FETCH promising one literal size but delivering less must abort
+// the expire run — the truncation guard refuses to reason about a body it
+// did not fully receive. (Connection-drop during a literal is beta.9's
+// EOF-means-done short read, caught by the Size() check.)
+func TestExpireProofFetchTruncated(t *testing.T) {
+	quietLog()
+	if raceEnabled {
+		t.Skip("go-imap v2 beta.9 client races on EOF-during-literal — upstream bug, not ours")
+	}
+	port := startRawScriptIMAP(t,
+		func(tag string) rawReply { return rawReply{"* SEARCH 1\r\n" + tag + " OK done\r\n", false} },
+		func(tag string) rawReply {
+			// promise 100 bytes of body, deliver 7, drop the socket — without
+			// the drop the client's literal reader blocks until respReadTimeout
+			return rawReply{`* 1 FETCH (UID 1 INTERNALDATE "01-Jan-2020 06:00:00 +0000" BODY[] {100}` + "\r\ntruncat", true}
+		})
+	env := syncTestEnv(t, port, "test", []string{"INBOX"})
+	seedRawState(t, env)
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"expire", "-config", env.cfgPath, "-before", "2025-01-01"})
+		})
+	})
+	if code == 0 {
+		t.Fatal("truncated proof body was silently swallowed")
+	}
+	if !strings.Contains(stderr, "body truncated: got 7 of 100 bytes") {
+		t.Fatalf("error must report the truncation, got: %q", stderr)
+	}
+}
+
+// A broken archive (the archive path is not even a directory — e.g. the
+// synced folder was wrecked) must block every deletion: os.Stat fails with
+// ENOTDIR, archiveHolds reports failure, every candidate is skipped.
+func TestExpireBrokenArchiveSkipsEverything(t *testing.T) {
+	quietLog()
+	env, u, _ := expireFixture(t)
+	archiveDir := env.arc.dir
+	stPath := env.cfg(t).StateFile
+	_ = stPath
+	if err := os.RemoveAll(archiveDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archiveDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"expire", "-config", env.cfgPath, "-before", "2025-01-01", "-do"})
+		})
+	})
+	if code != 0 {
+		t.Fatalf("expire with a broken archive must still exit 0 (skips are warnings), got %d: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "archive check failed") {
+		t.Fatalf("every candidate must be skipped with a warning, got: %q", stderr)
+	}
+	if got := serverMessages(t, u, "INBOX"); got != 3 {
+		t.Fatalf("broken archive deleted mail: %d left, want 3", got)
+	}
 }

@@ -175,8 +175,8 @@ func expireFolder(c *imapclient.Client, a *Account, folder string, arc *Archive,
 
 	uids, err := searchUIDsBefore(c, cutoff)
 	if err != nil {
-		// honest gap: same non-injectable fault class as searchUIDsBefore's
-		// own error paths (Session.Search takes an internal NumKind type)
+		// fault injection for SEARCH lives in TestExpireSearchTaggedNO's raw
+		// script server (the session hook cannot reach Search)
 		return 0, 0, fmt.Errorf("search: %w", err)
 	}
 	have := make(map[uint32]bool, len(fs.UIDs))
@@ -196,9 +196,8 @@ func expireFolder(c *imapclient.Client, a *Account, folder string, arc *Archive,
 
 	proved, err := proveHoldings(c, a, folder, arc, cands, cutoff, log)
 	if err != nil {
-		// only reachable via the truncation guard below (honest gap: needs
-		// raw-socket fault injection; even without it a truncated body fails
-		// the sha256 proof and the message is skipped, not deleted)
+		// reached via the truncation guard in proveHoldings
+		// (TestExpireProofFetchTruncated's raw script server injects it)
 		return 0, 0, err
 	}
 	if len(proved) == 0 {
@@ -280,9 +279,9 @@ func proveHoldings(c *imapclient.Client, a *Account, folder string, arc *Archive
 			case imapclient.FetchItemDataBodySection:
 				if item.Literal != nil {
 					b, err := io.ReadAll(item.Literal)
-					// same truncation guard as sync.go's fetchAndArchive
-					// (honest gap: beta.9 swallows short reads with err=nil,
-					// so this only fires under raw-socket fault injection)
+					// same truncation guard as sync.go's fetchAndArchive:
+					// beta.9 swallows short reads with err=nil (EOF ends the
+					// literal), so the promised size must be verified
 					if err == nil && item.Literal.Size() != int64(len(b)) {
 						err = fmt.Errorf("body truncated: got %d of %d bytes", len(b), item.Literal.Size())
 					}
@@ -335,7 +334,7 @@ func archiveHolds(arc *Archive, account string, raw []byte) (bool, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
-		return false, err // honest gap: non-ENOENT stat errors need a race window
+		return false, err // e.g. ENOTDIR when the archive path is wrecked (tested)
 	}
 	dec, err := arc.get(name)
 	if err != nil {

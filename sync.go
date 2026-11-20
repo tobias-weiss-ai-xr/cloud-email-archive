@@ -240,10 +240,11 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 // before cutoff (server-side UID SEARCH BEFORE — date-only, exclusive). This
 // is the date-scoped alternative to enumerateUIDs for "archive old mail".
 //
-// Honest gap: the error paths (tagged NO, non-UID search reply) are not
-// injectable through the test session hook — Session.Search's NumKind
-// parameter lives in go-imap's internal imapwire package, unnameable outside
-// the library. Both branches are plain error propagation.
+// Fault injection for the SEARCH reply lives in the raw script server
+// (TestSyncBeforeSearchTaggedNO); the session hook cannot reach Search.
+// The non-UID-set reply branch is defense for future client versions:
+// against beta.9 it is unreachable — UIDSearch always initializes All as
+// an (empty) UIDSet, and the client's handleSearch only ever appends to it.
 func searchUIDsBefore(c *imapclient.Client, cutoff time.Time) ([]imap.UID, error) {
 	data, err := c.UIDSearch(&imap.SearchCriteria{Before: cutoff}, nil).Wait()
 	if err != nil {
