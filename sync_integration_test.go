@@ -916,14 +916,17 @@ func startRawAbortIMAP(t *testing.T) int {
 
 func serveRawAbortIMAP(c net.Conn) {
 	defer c.Close() //nolint:errcheck
-	buf := make([]byte, 4096)
+	// line-based: the client may coalesce several commands into one TCP
+	// segment; answering one command per Read() deadlocks both sides on the
+	// unsent reply (seen as a rare full test-timeout hang)
+	rd := bufio.NewReader(c)
 	c.Write([]byte("* OK ready\r\n")) //nolint:errcheck
 	for {
-		n, err := c.Read(buf)
+		line, err := rd.ReadString('\n')
 		if err != nil {
 			return
 		}
-		line := string(buf[:n])
+		line = strings.TrimRight(line, "\r\n")
 		sp := strings.IndexByte(line, ' ')
 		if sp <= 0 {
 			continue
@@ -1349,17 +1352,28 @@ func TestExpireSkipsUIDValidityChanged(t *testing.T) {
 	if code := runSync(t, env.cfgPath); code != 0 {
 		t.Fatalf("sync exit = %d", code)
 	}
-	// recreate INBOX with brand-new content: new UIDVALIDITY, mail older than
-	// the cutoff that the state's UIDs do NOT refer to
+	// recreate INBOX and re-seed the IDENTICAL message: new UIDVALIDITY, same
+	// bytes, UID 1 again — so the hash proof would pass and only the
+	// UIDVALIDITY guard can prevent deletion (mutation-tested)
 	if err := u.Delete("INBOX"); err != nil {
 		t.Fatal(err)
 	}
 	if err := u.Create("INBOX", nil); err != nil {
 		t.Fatal(err)
 	}
-	seedMailAt(t, u, "INBOX", "From: decoy@x.de\r\nSubject: decoy\r\n\r\ndecoy body\r\n", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local))
-	if code := runExpire(t, env.cfgPath, "-before", "2025-01-01", "-do"); code != 0 {
+	seedMailAt(t, u, "INBOX", "From: old@x.de\r\nSubject: old\r\n\r\nbody\r\n", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local))
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"expire", "-config", env.cfgPath, "-before", "2025-01-01", "-do"})
+		})
+	})
+	if code != 0 {
 		t.Fatalf("expire -do exit = %d", code)
+	}
+	if !strings.Contains(stderr, "UIDVALIDITY changed") {
+		t.Fatalf("must refuse with a UIDVALIDITY warning, got: %q", stderr)
 	}
 	if got := serverMessages(t, u, "INBOX"); got != 1 {
 		t.Fatalf("expire deleted mail after UIDVALIDITY change: %d left, want 1", got)
@@ -1906,5 +1920,72 @@ func TestExpireBrokenArchiveSkipsEverything(t *testing.T) {
 	}
 	if got := serverMessages(t, u, "INBOX"); got != 3 {
 		t.Fatalf("broken archive deleted mail: %d left, want 3", got)
+	}
+}
+
+// The drift guard's boundary is pinned here, not just its direction: a
+// message whose FETCHED INTERNALDATE is exactly cutoff+1h must be skipped
+// (the guard demands strictly-before), even though the server's date-only
+// SEARCH still reports it in the BEFORE set. The drifted date is computed
+// from the parsed cutoff, so this holds in every timezone. (Mutation check:
+// widening the guard to cutoff+1d must fail this test.)
+func TestExpireCutoffBoundaryExclusive(t *testing.T) {
+	quietLog()
+	msg := "From: a@x.de\r\nSubject: boundary\r\n\r\nbody\r\n"
+	u, port := startMemIMAPHook(t, "testuser", "testpw", func(s imapserver.Session) imapserver.Session {
+		return &hookSession{Session: s, fetch: func(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+			// serve a stored-old message with a FETCHED INTERNALDATE one hour
+			// after the local-midnight cutoff: server search says "in scope",
+			// the message itself disagrees — the guard must trust the message
+			rw := w.CreateMessage(1)
+			rw.WriteUID(1)
+			rw.WriteInternalDate(time.Date(2025, 1, 1, 1, 0, 0, 0, time.Local))
+			wc := rw.WriteBodySection(&imap.FetchItemBodySection{Peek: true}, int64(len(msg)))
+			wc.Write([]byte(msg)) //nolint:errcheck
+			wc.Close()            //nolint:errcheck
+			return rw.Close()
+		}}
+	})
+	seedMailAt(t, u, "INBOX", msg, time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local)) // stored: safely before
+	env := syncTestEnv(t, port, "test", nil)
+	if code := runSync(t, env.cfgPath); code != 0 {
+		t.Fatalf("sync exit = %d", code)
+	}
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"expire", "-config", env.cfgPath, "-before", "2025-01-01", "-do"})
+		})
+	})
+	if code != 0 {
+		t.Fatalf("expire -do exit = %d", code)
+	}
+	if !strings.Contains(stderr, "INTERNALDATE outside requested window") {
+		t.Fatalf("boundary message must be skipped with a drift warning, got: %q", stderr)
+	}
+	if got := serverMessages(t, u, "INBOX"); got != 1 {
+		t.Fatalf("cutoff-boundary message was deleted: %d left, want 1", got)
+	}
+}
+
+// Missing -before must refuse loudly (mutation check: dropping the
+// requirement must fail this test — without it expire would need no explicit
+// cutoff at all).
+func TestExpireMissingBeforeRejected(t *testing.T) {
+	quietLog()
+	env, _, _ := expireFixture(t)
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"expire", "-config", env.cfgPath})
+		})
+	})
+	if code == 0 {
+		t.Fatal("expire without -before must exit non-zero")
+	}
+	if !strings.Contains(stderr, "requires -before") {
+		t.Fatalf("must name the missing requirement, got: %q", stderr)
 	}
 }
