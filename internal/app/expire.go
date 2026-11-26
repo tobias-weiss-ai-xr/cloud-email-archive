@@ -336,6 +336,13 @@ func archiveHolds(arc *Archive, account string, raw []byte) (bool, error) {
 	sum := sha256.Sum256(raw)
 	name := blobName(account, raw)
 	path := filepath.Join(arc.dir, name)
+	// Windows resolves stat beneath a file-parent as ENOENT (would read as
+	// "not held" instead of "archive broken"); check the archive dir itself
+	// so a wrecked archive path reports the same error class everywhere —
+	// "archive check failed", never deletion on a hunch
+	if fi, err := os.Stat(arc.dir); err == nil && !fi.IsDir() {
+		return false, fmt.Errorf("%s: not a directory", arc.dir)
+	}
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil

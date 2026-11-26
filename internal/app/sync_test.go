@@ -129,6 +129,7 @@ func TestWantAccount(t *testing.T) {
 // Self-signed cert with an IP SAN matching the dial target — real handshake,
 // real verification, no insecure shortcuts on the client side.
 func TestDialStartTLS(t *testing.T) {
+	skipOnWindows(t, "Windows system cert store ignores SSL_CERT_FILE")
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)

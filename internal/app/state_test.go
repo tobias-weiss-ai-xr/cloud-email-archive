@@ -67,6 +67,7 @@ func TestStateNilAccountsHealed(t *testing.T) {
 }
 
 func TestStateSaveAtomic(t *testing.T) {
+	needPosixPerms(t)
 	path := filepath.Join(t.TempDir(), "nested", "state.json")
 	s := &State{Accounts: map[string]map[string]*FolderState{}}
 	s.folder("a", "INBOX").UIDValidity = 1

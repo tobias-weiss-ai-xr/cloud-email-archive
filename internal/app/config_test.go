@@ -188,7 +188,9 @@ password = "a"
 password_cmd = "echo b"
 `
 	content = fmt.Sprintf(content,
-		filepath.Join(dir, "archive"), filepath.Join(dir, "key.txt"), filepath.Join(dir, "state.json"))
+		filepath.ToSlash(filepath.Join(dir, "archive")),
+		filepath.ToSlash(filepath.Join(dir, "key.txt")),
+		filepath.ToSlash(filepath.Join(dir, "state.json")))
 	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}

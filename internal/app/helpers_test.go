@@ -23,6 +23,15 @@ func needPosixPerms(t *testing.T) {
 	}
 }
 
+// skipOnWindows guards tests whose premise is unix-only: POSIX permission
+// semantics, HOME-based path resolution, or fault injection that removes an
+// open file (Windows refuses deletion of open handles).
+func skipOnWindows(t *testing.T, reason string) {
+	if runtime.GOOS == "windows" {
+		t.Skip(reason)
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	return captureStream(t, &os.Stdout, fn)

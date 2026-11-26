@@ -979,6 +979,7 @@ func TestGetUvarintTooLong(t *testing.T) {
 // writeSegment fault injection: Write and Close failures must clean up the
 // temp file and propagate.
 func TestWriteSegmentWriteAndCloseFault(t *testing.T) {
+	skipOnWindows(t, "fault removes an open file — Windows refuses")
 	quietLog()
 	for _, tc := range []struct {
 		name string

@@ -62,6 +62,7 @@ func TestRunDispatch(t *testing.T) {
 }
 
 func TestRunKeygen(t *testing.T) {
+	needPosixPerms(t)
 	keyPath := filepath.Join(t.TempDir(), "gen-key.txt")
 	var out string
 	var code int
@@ -109,6 +110,7 @@ func TestGetenvDefault(t *testing.T) {
 // Without HOME and XDG_CONFIG_HOME, userCfgDir falls back to a relative
 // "cloud-email-archive" instead of panicking or writing to "/...".
 func TestUserCfgDirFallback(t *testing.T) {
+	skipOnWindows(t, "UserConfigDir resolves via APPDATA, not HOME — unix-only fallback")
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 	if got := userCfgDir(); got != "cloud-email-archive" {
@@ -329,6 +331,7 @@ func TestFlagErrHelpExitsZero(t *testing.T) {
 
 // keygen without -output writes to the default path under the user config dir.
 func TestCmdKeygenDefaultPath(t *testing.T) {
+	skipOnWindows(t, "default path resolves via APPDATA, not HOME — unix-only")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
