@@ -250,6 +250,13 @@ func writeSegment(a *Archive, s *idxSegment) (string, error) {
 		os.Remove(tmpPath)
 		return "", err
 	}
+	// closing the age writer flushes the stream but NOT the underlying
+	// file — an open handle blocks Rename on Windows (Linux tolerates it;
+	// found by the windows CI job)
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", err
+	}
 	if err := os.Rename(tmpPath, filepath.Join(a.dir, name)); err != nil {
 		os.Remove(tmpPath)
 		return "", err

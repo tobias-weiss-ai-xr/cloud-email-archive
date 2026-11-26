@@ -13,9 +13,10 @@ import (
 )
 
 // captureStdout runs fn while capturing everything it writes to os.Stdout.
-// needPosixPerms skips tests that inject faults via POSIX directory
-// permissions (chmod 0o500/0o000). Windows ignores the read-only attribute
-// on directories, so those injections do not produce failures there.
+// needPosixPerms skips tests that rely on POSIX file/directory permission
+// semantics (chmod 0o500/0o600/0o000 for fault injection or mode
+// assertions). Windows maps chmod to an advisory read-only attribute and
+// reports different mode bits, so those tests cannot hold there.
 func needPosixPerms(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fault injection via POSIX dir permissions is not portable to windows")

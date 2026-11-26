@@ -172,6 +172,17 @@ type blob struct {
 }
 
 func (a *Archive) blobs() ([]blob, error) {
+	// Windows' ReadDir succeeds with zero entries when the path is a file
+	// (Linux errors); without this check a wrecked archive path would look
+	// like an empty archive — verify would report success over nothing
+	if fi, err := os.Stat(a.dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	} else if !fi.IsDir() {
+		return nil, fmt.Errorf("%s: not a directory", a.dir)
+	}
 	entries, err := os.ReadDir(a.dir)
 	if err != nil {
 		if os.IsNotExist(err) {

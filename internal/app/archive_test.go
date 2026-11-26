@@ -367,6 +367,7 @@ func TestParseHeaders(t *testing.T) {
 }
 
 func TestKeyPermissions(t *testing.T) {
+	needPosixPerms(t)
 	keyFile := filepath.Join(t.TempDir(), "k.txt")
 	captureStdout(t, func() {
 		if err := writeNewKey(keyFile); err != nil {
@@ -697,6 +698,7 @@ func TestPutTmpCloseFault(t *testing.T) {
 // filesystems): the writer's Close removes the tmp path; the still-open fd
 // makes put's tmp.Close succeed, then Chmod hits ENOENT.
 func TestPutChmodFault(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	env := newTestEnv(t)
 	env.arc.newWriter = func(w io.Writer, r ...age.Recipient) (io.WriteCloser, error) {

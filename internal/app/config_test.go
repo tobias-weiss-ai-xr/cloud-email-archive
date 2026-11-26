@@ -174,6 +174,8 @@ func TestFindAccount(t *testing.T) {
 func TestLoadConfigRejectsBothPasswordForms(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.toml")
+	// windows backslashes are TOML escapes — keep paths TOML-safe
+	dir = filepath.ToSlash(dir)
 	content := `
 archive_dir = "%s"
 key_file = "%s"
