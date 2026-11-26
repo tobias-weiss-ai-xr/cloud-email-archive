@@ -21,7 +21,12 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-            GOOS="${target%/*}" GOARCH="${target#*/}" \
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            # separate statements: a `GOOS=... go build -o "...$GOOS..."`
+            # command-prefix expands $GOOS BEFORE the assignment applies,
+            # producing empty names
+            GOOS="$GOOS" GOARCH="$GOARCH" \
               go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
               -o "dist/cloud-email-archive-$GOOS-$GOARCH" .
           done
