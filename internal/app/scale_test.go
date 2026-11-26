@@ -1,4 +1,4 @@
-package main
+package app
 
 // Scale harness for the 500 GB growth question: generates a deterministic
 // mail corpus (text + base64 attachment mix, realistic proportions), archives

@@ -14,7 +14,7 @@ Reproduce the scale numbers yourself:
 CEA_SCALE_MB=500  go test -run TestScaleCorpus -timeout 30m .
 CEA_SCALE_MB=8192 go test -run TestScaleCorpus -timeout 60m .
 # then drive the real binary against /tmp/cea-scale/config.toml
-go build -o /tmp/cea-scale/cea . && cd /tmp/cea-scale
+go build -o /tmp/cea-scale/cea ../cmd/cea && cd /tmp/cea-scale
 time ./cea index  -config config.toml
 time ./cea search -config config.toml zebratail
 time ./cea search -config config.toml -raw zebratail

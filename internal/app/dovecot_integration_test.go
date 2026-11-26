@@ -16,7 +16,7 @@
 //
 // Run:	go test -tags integration -run TestDovecot -v
 
-package main
+package app
 
 import (
 	"fmt"

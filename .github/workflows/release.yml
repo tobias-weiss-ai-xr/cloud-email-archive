@@ -27,8 +27,8 @@ jobs:
             # command-prefix expands $GOOS BEFORE the assignment applies,
             # producing empty names
             GOOS="$GOOS" GOARCH="$GOARCH" \
-              go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
-              -o "dist/cloud-email-archive-$GOOS-$GOARCH" .
+              go build -trimpath -ldflags "-s -w -X github.com/tobias-weiss-ai-xr/cloud-email-archive/internal/app.version=$VERSION" \
+              -o "dist/cloud-email-archive-$GOOS-$GOARCH" ./cmd/cea
           done
           cd dist && sha256sum * > SHA256SUMS
       - name: Create release

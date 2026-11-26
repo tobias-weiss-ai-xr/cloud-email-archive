@@ -1,4 +1,4 @@
-package main
+package app
 
 // Configuration for cloud-email-archive. Accounts is a generic list (0..n), so each account
 // type — faculty dovecot, Verwaltung Exchange, whatever — is optional and any

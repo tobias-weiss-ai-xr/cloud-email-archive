@@ -1,5 +1,5 @@
 //go:build !race
 
-package main
+package app
 
 var raceEnabled = false

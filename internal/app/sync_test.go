@@ -1,4 +1,4 @@
-package main
+package app
 
 // Unit tests for the sync plumbing that doesn't need a live IMAP server.
 

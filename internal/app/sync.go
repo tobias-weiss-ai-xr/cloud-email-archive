@@ -1,4 +1,4 @@
-package main
+package app
 
 // IMAP sync: connect per account, select each folder read-only, enumerate UIDs,
 // fetch BODY[] (peek, never marks \\Seen) for every UID not yet archived, write

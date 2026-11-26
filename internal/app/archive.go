@@ -1,4 +1,4 @@
-package main
+package app
 
 // Archive layer: age-encrypted, content-addressed message blobs.
 //

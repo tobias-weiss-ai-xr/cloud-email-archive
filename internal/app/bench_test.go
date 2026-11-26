@@ -1,4 +1,4 @@
-package main
+package app
 
 // Regression benchmarks for the encrypted trigram index. Corpus size scales
 // with CEA_BENCH_MB (default 32 MB, CI-friendly); docs/benchmark.md records

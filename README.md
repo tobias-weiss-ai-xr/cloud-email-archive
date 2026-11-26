@@ -31,7 +31,7 @@ decrypted mail), catching renames, copy bugs, or provider-side mangling.
 ## Build
 
 ```sh
-go build -o cloud-email-archive .   # single binary, cross-compilable (linux/darwin/windows)
+go build -o cloud-email-archive ./cmd/cea   # single binary, cross-compilable (linux/darwin/windows)
 ```
 
 Prebuilt linux/darwin binaries (amd64/arm64) with SHA256SUMS are published on

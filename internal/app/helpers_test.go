@@ -1,4 +1,4 @@
-package main
+package app
 
 // Shared test helpers: stdout/stderr capture and a full test environment
 // (config file + key + seeded archive) for CLI-level tests.

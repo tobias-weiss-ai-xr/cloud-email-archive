@@ -1,4 +1,4 @@
-package main
+package app
 
 // CLI dispatch tests for run() — no network, no IMAP server.
 
@@ -279,8 +279,7 @@ func TestCmdSyncErrorBranches(t *testing.T) {
 // stays at 0% in `go tool cover`; this test proves the wiring instead.
 func TestMainSubprocess(t *testing.T) {
 	if os.Getenv("CEA_MAIN_CHILD") == "1" {
-		main() // exits the process
-		return
+		os.Exit(Run(os.Args[1:])) // same wiring the real main() uses
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestMainSubprocess$")
 	cmd.Env = append(os.Environ(), "CEA_MAIN_CHILD=1")

@@ -1,4 +1,4 @@
-package main
+package app
 
 // expire: delete mail from the IMAP server after the archive provably holds
 // a copy. The archive itself stays append-only — expire only frees space on

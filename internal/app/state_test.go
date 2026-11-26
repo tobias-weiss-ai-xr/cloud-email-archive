@@ -1,4 +1,4 @@
-package main
+package app
 
 // Experiential-memory tests for the fetch-state bookkeeping file.
 

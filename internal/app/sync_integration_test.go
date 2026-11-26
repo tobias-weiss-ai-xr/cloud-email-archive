@@ -1,4 +1,4 @@
-package main
+package app
 
 // End-to-end sync tests against an in-process IMAP server (go-imap's
 // imapmemserver). They exercise the production path: login → list/select →

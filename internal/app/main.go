@@ -1,4 +1,4 @@
-package main
+package app
 
 // cloud-email-archive — encrypted email archive synced to any cloud folder.
 // Single static binary: fetch (IMAP) + encrypt (age) + archive, cross-platform.
@@ -15,7 +15,7 @@ import (
 )
 
 // version is the single source for the `version` command; CI/release builds
-// can stamp it with -ldflags "-X main.version=...".
+// can stamp it with -ldflags "-X github.com/tobias-weiss-ai-xr/cloud-email-archive/internal/app.version=...".
 var version = "0.1.0"
 
 const usageText = `cloud-email-archive — encrypted email archive synced to a cloud folder
@@ -38,8 +38,11 @@ Key:     ~/.config/cloud-email-archive/key.txt  (never put inside the synced fol
 Run "cloud-email-archive <cmd> -h" for command-specific flags.
 `
 
-func main() {
-	os.Exit(run(os.Args[1:]))
+// Run executes the CLI with the given arguments and returns the process
+// exit code. Entry point for cmd/cea; kept free of os.Exit so tests can
+// exercise the dispatch table.
+func Run(args []string) int {
+	return run(args)
 }
 
 // run executes one CLI invocation and returns the process exit code. Kept

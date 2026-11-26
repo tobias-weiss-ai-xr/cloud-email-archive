@@ -1,4 +1,4 @@
-package main
+package app
 
 // Fuzzing for the untrusted-input surface: archived RFC822 bytes come from
 // arbitrary mail servers, so parseHeaders must never panic and must never

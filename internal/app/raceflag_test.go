@@ -1,6 +1,6 @@
 //go:build race
 
-package main
+package app
 
 // Build-tag flags to detect the race detector at test runtime.
 

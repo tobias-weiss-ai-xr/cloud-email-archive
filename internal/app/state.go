@@ -1,4 +1,4 @@
-package main
+package app
 
 // Local fetch-state: which (folder, UID) pairs are already archived, keyed by
 // UIDVALIDITY so a mailbox reset triggers a clean re-fetch. Plaintext UIDs only,

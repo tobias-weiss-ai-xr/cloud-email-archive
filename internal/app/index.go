@@ -1,4 +1,4 @@
-package main
+package app
 
 // Encrypted trigram search index over decoded mail text.
 //

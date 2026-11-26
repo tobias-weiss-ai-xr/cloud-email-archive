@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"os/exec"
@@ -15,7 +15,9 @@ func TestE2EBinary(t *testing.T) {
 	quietLog()
 	goBin := filepath.Join(runtime.GOROOT(), "bin", "go")
 	bin := filepath.Join(t.TempDir(), "cea")
-	if out, err := exec.Command(goBin, "build", "-o", bin, ".").CombinedOutput(); err != nil {
+	// build via import path so the test's CWD (internal/app) doesn't matter
+	const pkgPath = "github.com/tobias-weiss-ai-xr/cloud-email-archive/cmd/cea"
+	if out, err := exec.Command(goBin, "build", "-o", bin, pkgPath).CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
 

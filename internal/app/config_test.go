@@ -1,4 +1,4 @@
-package main
+package app
 
 // Config loading and validation tests — including the regression for the
 // formerly reachable panic() on empty archive_dir.

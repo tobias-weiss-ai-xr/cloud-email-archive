@@ -108,17 +108,22 @@ ein Vollbeweis der Archiv-Integrität — keine separate Checksummen-Tabelle nö
 ## 5. Bausteinsicht
 
 ```
-cloud-email-archive (package main)
- ├── main.go          CLI-Dispatch (keygen|sync|index|list|search|extract|verify)
- ├── config.go        TOML-Config, Defaults, Konto-Auflösung
- ├── archive.go       Age-Layer: Blobname (SHA-256), put/get/walk, Header-Parsing
- ├── state.go         state.json Laden/Speichern (UIDVALIDITY/UIDs)
- ├── sync.go          IMAP-Sync: login/select/enumerate/fetch/encrypt (+ Index-Pflege)
- ├── view.go          list/search/extract/verify (lesend, offline)
- ├── index.go         Verschlüsselter Trigram-Index (.idx-<sha256>.age-Segmente,
- │                    Cache, Kompaktierung, Self-Heal; abgeleitete Daten)
- └── *-test.go        Unit + In-Prozess-IMAP-Integrationstest, Fuzz-Targets,
-                      Benchmarks (bench_test.go), Scale-Harness (scale_test.go)
+cloud-email-archive
+├── cmd/cea/main.go          thinner Entry-Point: main() -> app.Run
+└── internal/app/            (package app — gesamte Anwendungslogik)
+    ├── main.go              CLI-Dispatch (keygen|sync|index|list|search|extract|verify)
+    ├── config.go            TOML-Config, Defaults, Konto-Auflösung
+    ├── archive.go           Age-Layer: Blobname (SHA-256), put/get/walk, Header-Parsing
+    ├── state.go             state.json Laden/Speichern (UIDVALIDITY/UIDs)
+    ├── sync.go              IMAP-Sync: login/select/enumerate/fetch/encrypt (+ Index-Pflege)
+    ├── view.go              list/search/extract/verify (lesend, offline)
+    ├── index.go             Verschlüsselter Trigram-Index (.idx-<sha256>.age-Segmente,
+    │                        Cache, Kompaktierung, Self-Heal; abgeleitete Daten)
+    ├── lock.go/lock_stub.go Single-Writer-Lock (flock, Unix; No-op anderswo)
+    └── *_test.go            Unit + In-Prozess-IMAP-Integrationstest, Fuzz-Targets,
+                             Benchmarks (bench_test.go), Scale-Harness (scale_test.go),
+                             Dovecot-Tier (dovecot_integration_test.go, -tags integration),
+                             True-Binary-E2E (e2e_test.go)
 ```
 
 ### Abhängigkeiten

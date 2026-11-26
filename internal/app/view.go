@@ -1,4 +1,4 @@
-package main
+package app
 
 // View commands: list, search, extract, verify. All decrypt locally; nothing
 // here ever touches the network or the synced folder's plaintext.

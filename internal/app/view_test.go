@@ -1,4 +1,4 @@
-package main
+package app
 
 // CLI-level tests for the read commands: list, search, extract, verify.
 // They run the real cmd* functions against a real encrypted archive on disk
