@@ -431,6 +431,7 @@ func TestWriteNewKeyOverwrite(t *testing.T) {
 // put must fail cleanly (no tmp leftovers) when the archive dir cannot be
 // created or written.
 func TestPutErrorPaths(t *testing.T) {
+	needPosixPerms(t)
 	id := testID(t)
 
 	t.Run("dir path is a file", func(t *testing.T) {
@@ -543,6 +544,7 @@ func TestPutEncryptionErrorPaths(t *testing.T) {
 
 // sweep must surface removal failures (e.g. read-only dir).
 func TestSweepStaleTmpRemoveError(t *testing.T) {
+	needPosixPerms(t)
 	dir := t.TempDir()
 	stale := filepath.Join(dir, "a_abc.age.tmp1234")
 	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
@@ -599,6 +601,7 @@ func TestWalkBlobsError(t *testing.T) {
 // put must surface unexpected stat errors (unreadable archive dir) instead of
 // silently treating the blob as already-present.
 func TestPutUnreadableArchiveDir(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -618,6 +621,7 @@ func TestPutUnreadableArchiveDir(t *testing.T) {
 // sweepStaleTmp must report an unreadable dir rather than pretending it is
 // clean (IsNotExist is the only tolerated case).
 func TestSweepStaleTmpUnreadable(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o000); err != nil {
@@ -632,6 +636,7 @@ func TestSweepStaleTmpUnreadable(t *testing.T) {
 // put must surface CreateTemp failures (write-protected dir) instead of
 // pretending the blob is archived.
 func TestPutWriteProtectedDir(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -713,6 +718,7 @@ func TestPutChmodFault(t *testing.T) {
 // write, e.g. a concurrent admin action on a share): put must surface the
 // error and leave no blob — and sweepStaleTmp must clean the orphan tmp up.
 func TestPutRenameFault(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	env := newTestEnv(t)
 	env.arc.newWriter = func(w io.Writer, r ...age.Recipient) (io.WriteCloser, error) {
@@ -763,6 +769,7 @@ func TestSweepStaleTmpVanishedEntry(t *testing.T) {
 // listing, e.g. a permissions race on a share) — silent loss would hide a
 // growing tmp pile-up.
 func TestSweepStaleTmpUndeletable(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	dir := t.TempDir()
 	f := filepath.Join(dir, "old.tmp")

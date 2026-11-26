@@ -163,6 +163,7 @@ func TestLoadCfgEnvBadKeyFile(t *testing.T) {
 // cmdSync branches: corrupt state, unwritable state dir, no accounts,
 // unknown -account.
 func TestCmdSyncErrorBranches(t *testing.T) {
+	needPosixPerms(t)
 	t.Run("corrupt state file", func(t *testing.T) {
 		env := newTestEnv(t)
 		if err := os.WriteFile(filepath.Join(env.dir, "state.json"), []byte("{not json"), 0o600); err != nil {
@@ -459,6 +460,7 @@ func TestSyncIndexFailureWarnsNotFails(t *testing.T) {
 // update's blob enumeration fails (warn), while blob WRITES still succeed
 // (-wx allows create+rename) — so the sync itself must exit 0 and store mail.
 func TestSyncBestEffortStepsWarnNotFail(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	u, port := startMemIMAP(t, "testuser", "testpw")
 	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: one\r\n\r\nbody\r\n")

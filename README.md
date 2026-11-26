@@ -192,3 +192,19 @@ go test -tags integration -run TestDovecot -v
 # (runs as part of the normal suite)
 go test -run TestE2EBinary -v
 ```
+
+CI additionally runs the suite on `windows-latest` (portable subset: the
+single-writer flock is a Unix syscall; on Windows the lock stub is a no-op
+and POSIX-permission fault-injection tests skip themselves) and a timezone
+matrix, since all date logic is cutoff-based.
+
+### Mutation campaign
+
+The safety gates (UIDVALIDITY guard, INTERNALDATE drift guard, truncation
+guards, proof equality, flock, dry-run default) are enforced by tests, not
+just present: `scripts/mutate.sh` weakens each gate one at a time and requires
+the targeted test to fail. A mutation that compiles and runs but whose test
+still passes is reported as SURVIVED and fails the script — that is the
+signal to strengthen the test. Statement coverage alone misses this class:
+the proof-equality gate had 100% statement coverage while its false branch
+was never asserted (found by exactly this campaign).

@@ -389,6 +389,7 @@ func TestCmdSearchIndexedVsRaw(t *testing.T) {
 }
 
 func TestCmdSearchIndexedFallsBackWhenIndexFails(t *testing.T) {
+	needPosixPerms(t)
 	env := newTestEnv(t)
 	quietLog()
 	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha fallback")); err != nil {
@@ -1222,6 +1223,7 @@ func TestIndexedQuotedPrintable(t *testing.T) {
 
 // ensureIndex must fail on an unreadable archive dir (blob enumeration).
 func TestEnsureIndexUnreadableDir(t *testing.T) {
+	needPosixPerms(t)
 	env := newTestEnv(t)
 	quietLog()
 	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
@@ -1320,6 +1322,7 @@ func TestCompactionWriteFailureKeepsOriginals(t *testing.T) {
 // pruneIndexCache best-effort: an unreadable cache dir must not fail the
 // overall index run.
 func TestPruneIndexCacheUnreadableDir(t *testing.T) {
+	needPosixPerms(t)
 	env := newTestEnv(t)
 	quietLog()
 	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
@@ -1343,6 +1346,7 @@ func TestPruneIndexCacheUnreadableDir(t *testing.T) {
 // turns -wx (rename still possible, readdir not). 0333 is the only mode that
 // separates the two operations.
 func TestEnsureIndexPostWriteListFault(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	env := newTestEnv(t)
 	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
@@ -1369,6 +1373,7 @@ func TestEnsureIndexPostWriteListFault(t *testing.T) {
 // Compaction: the merged segment writes fine, but the subsequent inventory
 // readdir fails (-wx) — compaction must surface that and keep every original.
 func TestCompactionPostWriteListFault(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	env := newTestEnv(t)
 	var names []string
@@ -1411,6 +1416,7 @@ func TestCompactionPostWriteListFault(t *testing.T) {
 // queryIndex on an unreadable archive dir must fail (callers fall back to the
 // raw scan) — silent empty results would hide a broken index.
 func TestQueryIndexUnreadableDir(t *testing.T) {
+	needPosixPerms(t)
 	quietLog()
 	env := newTestEnv(t)
 	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {

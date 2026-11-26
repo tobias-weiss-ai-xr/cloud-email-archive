@@ -8,10 +8,20 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 // captureStdout runs fn while capturing everything it writes to os.Stdout.
+// needPosixPerms skips tests that inject faults via POSIX directory
+// permissions (chmod 0o500/0o000). Windows ignores the read-only attribute
+// on directories, so those injections do not produce failures there.
+func needPosixPerms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fault injection via POSIX dir permissions is not portable to windows")
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	return captureStream(t, &os.Stdout, fn)

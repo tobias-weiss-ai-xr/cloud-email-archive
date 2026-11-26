@@ -739,6 +739,50 @@ func TestFetchMidLiteralAbort(t *testing.T) {
 	conn.Close() //nolint:errcheck
 }
 
+// The sync-side truncation guard in fetchAndArchive must abort the sync when
+// a FETCH promises more body bytes than it delivers: beta.9's literal reader
+// ends at EOF with err=nil, so the promised size is the only honest
+// comparison. (TestFetchMidLiteralAbort covers the raw reader level and does
+// NOT execute fetchAndArchive — the mutation campaign proved that gap.)
+func TestSyncTruncatedLiteralGuard(t *testing.T) {
+	quietLog()
+	if raceEnabled {
+		t.Skip("go-imap v2 beta.9 client races on EOF-during-literal — upstream bug, not ours")
+	}
+	// first sync on empty state enumerates UIDs via FETCH (UID) before the
+	// body fetch — answer that one cleanly, then truncate the BODY fetch
+	fetchCalls := 0
+	port := startRawScriptIMAP(t,
+		func(tag string) rawReply { return rawReply{"* SEARCH 1\r\n" + tag + " OK done\r\n", false} },
+		func(tag string) rawReply {
+			fetchCalls++
+			if fetchCalls == 1 {
+				return rawReply{"* 1 FETCH (UID 1)\r\n" + tag + " OK done\r\n", false}
+			}
+			// promise 100 bytes of body, deliver 7, drop the socket: EOF
+			// ends beta.9's literal read with err=nil — exactly the case
+			// only the Size() comparison can catch
+			return rawReply{`* 1 FETCH (UID 1 INTERNALDATE "01-Jan-2020 06:00:00 +0000" BODY[] {100}` + "\r\ntruncat", true}
+		})
+	env := syncTestEnv(t, port, "test", []string{"INBOX"})
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"sync", "-config", env.cfgPath})
+		})
+	})
+	if code == 0 {
+		t.Fatal("truncated body was archived silently")
+	}
+	if !strings.Contains(stderr, "body truncated: got 7 of 100 bytes") {
+		t.Fatalf("sync must report the truncation, got: %q", stderr)
+	}
+	if blobs, err := env.arc.blobs(); err != nil || len(blobs) != 0 {
+		t.Fatalf("truncated fetch archived data: %d blob(s)", len(blobs))
+	}
+}
+
 // \Noselect mailboxes (Dovecot hierarchy placeholders) must be filtered out
 // of enumeration: selecting them always fails.
 func TestSelectFoldersSkipsNoselect(t *testing.T) {
@@ -1181,6 +1225,63 @@ func TestExpireDeletesProvenOldMail(t *testing.T) {
 	assertBlobCount(t, env.arc, 3)
 }
 
+// A blob whose DECRYPTED content differs from the candidate (stat finds it,
+// decryption succeeds, sha256 differs) is not a proof either — the equality
+// comparison, not the blob's existence, is what the deletion decision rests
+// on. Mutating the comparison to always-true must fail this test (the
+// statement-coverage true-branch alone cannot: TestExpireSkipsUnprovenUID
+// only exercises the blob-missing path).
+func TestExpireBlobContentMismatchNotProven(t *testing.T) {
+	env, u, _ := expireFixture(t)
+	blobs, err := env.arc.blobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var swapped bool
+	for _, b := range blobs {
+		data, err := env.arc.get(b.name)
+		if err == nil && bytes.Contains(data, []byte("Subject: old one")) {
+			// re-encrypt foreign plaintext under the archive key, store it
+			// under the candidate's exact blobname
+			var buf bytes.Buffer
+			w, err := age.Encrypt(&buf, env.arc.id.Recipient())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Write([]byte("From: forged@x.de\r\nSubject: forged\r\n\r\nother body\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(env.arc.dir, b.name), buf.Bytes(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			swapped = true
+			break
+		}
+	}
+	if !swapped {
+		t.Fatal("could not find blob to swap")
+	}
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"expire", "-config", env.cfgPath, "-before", "2025-01-01", "-do"})
+		})
+	})
+	if code != 0 {
+		t.Fatalf("expire -do exit = %d, stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "archive does not hold this message") {
+		t.Fatalf("mismatched blob must be treated as unproven, got: %q", stderr)
+	}
+	if got := serverMessages(t, u, "INBOX"); got != 2 {
+		t.Fatalf("server has %d message(s), want 2 (fresh + mismatched old)", got)
+	}
+}
+
 func TestExpireSkipsUnprovenUID(t *testing.T) {
 	env, u, _ := expireFixture(t)
 	// sabotage: one old message's blob vanishes from the archive — expire
@@ -1221,8 +1322,22 @@ func TestExpireSkipsNeverSyncedFolder(t *testing.T) {
 	seedMailAt(t, u, "INBOX", "From: old@x.de\r\nSubject: old\r\n\r\nbody\r\n", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local))
 	env := syncTestEnv(t, port, "test", nil)
 	// no sync ran — state has no folder entry
-	if code := runExpire(t, env.cfgPath, "-before", "2025-01-01", "-do"); code != 0 {
+	var stderr string
+	var code int
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			code = run([]string{"expire", "-config", env.cfgPath, "-before", "2025-01-01", "-do"})
+		})
+	})
+	if code != 0 {
 		t.Fatalf("expire -do exit = %d", code)
+	}
+	// the warning text is the observable that separates THIS guard from the
+	// UIDVALIDITY-changed guard (which also fires for a never-synced folder,
+	// since UIDVALIDITY 0 != server's — both contain "refusing to expire",
+	// only this one names the real cause; mutation-tested)
+	if !strings.Contains(stderr, "folder never synced") {
+		t.Fatalf("must refuse a never-synced folder with a warning, got: %q", stderr)
 	}
 	if got := serverMessages(t, u, "INBOX"); got != 1 {
 		t.Fatalf("expire deleted mail from a never-synced folder: %d left", got)

@@ -37,6 +37,22 @@ jobs:
       - name: Coverage
         run: go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
+  windows:
+    # the release ships windows/amd64 binaries, so windows must at least
+    # compile and pass the portable part of the suite. On windows the lock
+    # stub is a no-op (concurrent runs unsupported, documented) and tests
+    # injecting faults via POSIX dir permissions skip themselves.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test (portable suite)
+        run: go test -count=1 ./...
+
   integration:
     # real-server tier against Dovecot in Docker (foreign UIDPLUS/SEARCH/
     # INTERNALDATE implementations); opt-in locally via -tags integration

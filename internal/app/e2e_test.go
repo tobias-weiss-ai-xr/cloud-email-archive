@@ -12,6 +12,11 @@ import (
 // exercises exec, argv, signal handling or real stdout/stderr pipes. This
 // test builds the actual binary and drives it like a user would.
 func TestE2EBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// go.exe discovery and -o naming differ on windows; the build itself
+		// is covered by the release workflow's windows/amd64 target
+		t.Skip("true-binary E2E is unix-tested; windows covered by release build")
+	}
 	quietLog()
 	goBin := filepath.Join(runtime.GOROOT(), "bin", "go")
 	bin := filepath.Join(t.TempDir(), "cea")

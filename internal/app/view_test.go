@@ -541,6 +541,7 @@ func TestCmdExtractCorruptBlob(t *testing.T) {
 
 // index must fail loudly when blobs are unreadable (coverage probe path).
 func TestCmdIndexBlobsError(t *testing.T) {
+	needPosixPerms(t)
 	env := newTestEnv(t)
 	quietLog()
 	if _, err := env.arc.put("acc", []byte("Subject: one\r\n\r\nalpha")); err != nil {
