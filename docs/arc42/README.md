@@ -236,6 +236,9 @@ Exit-Code != 0 bei Korruption (Index-Dateien werden ignoriert).
 | 4 | ein Binary, keine Daemons | „runs anywhere", keine Systemd/Service-Abhängigkeit, Cron statt Service |
 | 5 | Konten als generische [[accounts]]-Liste | beide Typen optional, Kombination frei, zukunftsoffen (neue IMAP-Quellen) |
 | 6 | Kein Löschen (append-only) | Archiv-Semantik; Revisionssicherheit; Datenschutz-Löschung = Schlüssel vernichten |
+| 7 | Ordner-Zuordnung im State, nicht in den Blobs | Blob-Layer bleibt content-addressed und ordnerblind (Dedup über Ordnergrenzen); `omitempty` hält alte State-Dateien in beide Richtungen ladbar. Alternative (Blob-Namensschema mit Ordner) hätte Ordner im Klartext auf der Cloud geleakt |
+| 8 | State verschlüsselt + Key passphrasengeschützt (opt-in) | state.json trägt die sensibelsten Metadaten (Ordnerhierarchie, UID→Blob); Armor an den Archiv-Empfänger, Keyscrypt nur auf dem Passphrase-Umschlag (X25519 für State: kein KDF-Tax beim Start). Alternative plaintext State verworfen: Meta-Leak widerspräche dem Datenschutzmodell |
+| 9 | IMAPS default ohne InsecureSkipVerify-Option | Verschlüsselung nicht abschaltbar machen; `security=none` bleibt laut gewarnt. Self-Signed-CAs via SSL_CERT_FILE statt Skip-Verify |
 
 ---
 
