@@ -198,9 +198,11 @@ Exit-Code != 0 bei Korruption (Index-Dateien werden ignoriert).
   `CEA_PASSPHRASE` → `passphrase_cmd` → verdeckte Terminals-Eingabe (x/term).
   Bewusst KEIN `-passphrase`-Flag: Kommandozeilen sind in ps/history sichtbar.
   Klartext-Keyfiles bleiben unverändert gültig.
-- IMAP-Verbindung: Default IMAPS/implizites TLS (Zertifikatsprüfung, TLS ≥ 1.2,
-  kein InsecureSkipVerify — bewusst nicht konfigurierbar). `security = "none"`
-  wird laut gewarnt.
+- IMAP-Verbindung: Default IMAPS/implizites TLS (Port 993; Zertifikatsprüfung
+  gegen den System-Store, TLS ≥ 1.2, kein InsecureSkipVerify — bewusst nicht
+  konfigurierbar; Self-Signed-CAs via `SSL_CERT_FILE`). `security = "none"`
+  wird laut gewarnt. Der verschlüsselte Pfad ist E2E getestet
+  (TestSyncImplicitTLSEndToEnd: Handshake → Login → Fetch → State → Reconnect).
 
 ### 8.2 Robustheit / Wiederaufnahme
 

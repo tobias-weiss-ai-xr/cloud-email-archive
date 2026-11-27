@@ -197,9 +197,14 @@ passphrase-protected key file, the complete metadata picture is now encrypted at
 rest: only while a command runs, with the passphrase supplied, does the folder
 hierarchy exist outside the encrypted blobs.
 
-`security = "none"` (unencrypted IMAP) is supported but loudly warned about;
-the default is IMAPS/implicit TLS with certificate verification (no
-`insecure_skip_verify` exists — there is nothing to disable).
+**Transport security**: the default is IMAPS/implicit TLS (port 993) with
+certificate verification against the system pool and a TLS-1.2 minimum —
+`security = "starttls"` and the self-signed-CA escape hatch `SSL_CERT_FILE`
+are supported. `security = "none"` (unencrypted IMAP) exists but is loudly
+warned about at runtime. There is no `insecure_skip_verify` option — there
+is nothing to disable. The encrypted path is proven end to end by
+`TestSyncImplicitTLSEndToEnd` (handshake → login → fetch → state →
+reconnect, against a verified certificate).
 
 ## Recovery
 

@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -190,6 +191,94 @@ func TestDialStartTLS(t *testing.T) {
 	defer c.Close()
 	if err := c.Login(a.User, a.Password).Wait(); err != nil {
 		t.Fatalf("login over starttls failed: %v", err)
+	}
+
+	// ---- phase 2: full sync E2E over implicit TLS (IMAPS default) ----
+	// Both TLS modes share ONE test because x509 caches the system cert
+	// pool per process after the first SSL_CERT_FILE read — a second test
+	// setting its own file would silently verify against the stale pool.
+	mem2 := imapmemserver.New()
+	u2 := imapmemserver.NewUser("testuser", "testpw")
+	if err := u2.Create("INBOX", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := u2.Create("Arbeit/Projekte", nil); err != nil {
+		t.Fatal(err)
+	}
+	mem2.AddUser(u2)
+	server2 := imapserver.New(&imapserver.Options{
+		NewSession: func(conn *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return mem2.NewSession(), nil, nil
+		},
+		InsecureAuth: true,
+		Caps: imap.CapSet{
+			imap.CapIMAP4rev1: {},
+			imap.CapIMAP4rev2: {},
+		},
+	})
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsLn := tls.NewListener(ln2, &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}})
+	t.Cleanup(func() {
+		server2.Close()
+		ln2.Close()
+	})
+	go server2.Serve(tlsLn)
+	port2 := ln2.Addr().(*net.TCPAddr).Port
+
+	seedMail(t, u2, "INBOX", "From: a@x.de\r\nSubject: inbox mail\r\n\r\nbody a\r\n")
+	seedMail(t, u2, "Arbeit/Projekte", "From: b@x.de\r\nSubject: project mail\r\n\r\nbody b\r\n")
+
+	// config WITHOUT security line — the implicit-TLS default must apply
+	dir2 := t.TempDir()
+	cfgPath := filepath.Join(dir2, "config.toml")
+	tomlData := fmt.Sprintf("archive_dir = %q\nkey_file = %q\nstate_file = %q\n\n[[accounts]]\nname = \"test\"\nhost = \"127.0.0.1\"\nport = %d\nuser = \"testuser\"\npassword = \"testpw\"\nfolders = [\"*\"]\n",
+		filepath.Join(dir2, "archive"), filepath.Join(dir2, "key.txt"), filepath.Join(dir2, "state.json"), port2)
+	if err := os.WriteFile(cfgPath, []byte(tomlData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		if err := writeNewKey(filepath.Join(dir2, "key.txt"), ""); err != nil {
+			t.Fatal(err)
+		}
+	})
+	cfg2, err := loadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Accounts[0].Security != "implicit" {
+		t.Fatalf("omitted security must default to implicit, got %q", cfg2.Accounts[0].Security)
+	}
+	if code := runSync(t, cfgPath); code != 0 {
+		t.Fatalf("sync over implicit TLS exit = %d", code)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir2, "archive"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".age") && !strings.HasPrefix(e.Name(), ".idx-") {
+			blobs++
+		}
+	}
+	if blobs != 2 {
+		t.Fatalf("implicit-TLS sync archived %d blobs, want 2", blobs)
+	}
+	// reconnect idempotence: second run over TLS loads state, finds nothing new
+	if code := runSync(t, cfgPath); code != 0 {
+		t.Fatalf("second sync over TLS exit = %d", code)
+	}
+	// folder column survives (state was written by the TLS sync)
+	out := captureStdout(t, func() {
+		if err := cmdList([]string{"-config", cfgPath}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "Arbeit/Projekte") {
+		t.Fatalf("list lost folder attribution over TLS sync, got:\n%s", out)
 	}
 }
 

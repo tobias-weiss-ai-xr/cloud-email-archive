@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"filippo.io/age"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -238,7 +240,7 @@ func TestDovecotIntegration(t *testing.T) {
 		t.Fatalf("sync exit = %d", code)
 	}
 	st := env.cfg(t).StateFile
-	state := readStateFor(t, st, "test", "INBOX")
+	state := readStateFor(t, st, env.arc.id, "test", "INBOX")
 	if len(state.UIDs) != 3 {
 		t.Fatalf("state has %d UIDs, want 3 (%v)", len(state.UIDs), state.UIDs)
 	}
@@ -283,7 +285,7 @@ func TestDovecotIntegration(t *testing.T) {
 	if code := runSync(t, env.cfgPath); code != 0 {
 		t.Fatalf("post-expire sync exit = %d", code)
 	}
-	state = readStateFor(t, st, "test", "INBOX")
+	state = readStateFor(t, st, env.arc.id, "test", "INBOX")
 	if len(state.UIDs) != 0 {
 		t.Fatalf("state must be pruned to the empty folder, got %v", state.UIDs)
 	}
@@ -294,9 +296,9 @@ func TestDovecotIntegration(t *testing.T) {
 
 // readStateFor reads one folder's state entry (the JSON schema lives in
 // state.go; tests only read it through the loader to stay format-agnostic).
-func readStateFor(t *testing.T, path, account, folder string) *FolderState {
+func readStateFor(t *testing.T, path string, id *age.X25519Identity, account, folder string) *FolderState {
 	t.Helper()
-	st, err := loadState(path, env.arc.id)
+	st, err := loadState(path, id)
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
