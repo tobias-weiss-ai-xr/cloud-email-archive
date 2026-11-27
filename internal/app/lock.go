@@ -12,7 +12,8 @@ import (
 // commands (sync, expire, index). Two concurrent runs against the same
 // profile would otherwise last-writer-wins each other's state file and race
 // on index segments; the archive itself is append-only and safe, but the
-// derived state is not. view and verify are read-only and lock-free.
+// derived state is not. list, search, extract and verify are read-only and
+// lock-free.
 //
 // The lock lives next to the state file as "<state>.lock" and is never
 // removed: unlinking a flock'd file would let a second process lock a fresh
