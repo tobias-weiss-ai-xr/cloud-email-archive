@@ -171,8 +171,12 @@ Exit-Code != 0 bei Korruption (Index-Dateien werden ignoriert).
 
 ### 8.1 Sicherheit / Datenschutz
 
-- Verschlüsselung client-seitig vor dem Sync; Provider sieht nur `.age`-Dateien mit
-  Hash-Namen (keine Klartext-Metadaten, Größen bleiben natürlich sichtbar).
+- Verschlüsselung client-seitig vor dem Sync; Provider sieht nur `.age`-Dateien.
+  **Garantiert verschlüsselt:** Mail-Inhalte (Blobs) und Suchindex. Der Index-
+  Dateiname ist ein reiner Hash; Blob-Dateinamen enthalten den Account-Namen im
+  Klartext (bewusst: account-scoped Reads filtern vor der Entschlüsselung) plus
+  SHA-256 als Dedup-Fingerprint; Anzahl/Größen der Mails bleiben sichtbar.
+  **Keine Ordnerstruktur, keine Subjects, keine Absender** im Sync-Ordner.
 - Alter: 256-Bit-X25519-Ephemeral-Key je Datei + ChaCha20-Poly1305 (age v1).
 - Schlüssel-Passwort/„privater Teil": nur `key.txt`, 0600-Berechtigungen,
   außerhalb des Sync-Ordners. Verlust = Datenverlust (bewusste Trade-off, um keine
@@ -181,6 +185,16 @@ Exit-Code != 0 bei Korruption (Index-Dateien werden ignoriert).
   bei MFA-Exchange.
 - Kein Klartext wird dauerhaft auf Platte geschrieben (nur in `extract`-Ausgabe, die
   der Nutzer explizit anfordert).
+- **Bekannte Lücke (lokal, nicht in der Cloud):** `state.json` liegt im Klartext
+  (`~/.config`) und enthält Accounts, Ordnerhierarchie, Nachrichten-zahlen und
+  die UID→Blob-Zuordnung. Begrenzung: wer `~/.config` lesen kann, liest auch
+  `key.txt` — solange der Key nicht passphrasengeschützt liegt, ist die Lücke
+  nicht der schwächste Link. Geplant: Passphrase-Modus + verschlüsseltes State
+  (dann ist die Cloud/Backup-Sicht vollständig metadatenfrei und der lokale
+  Metadaten-Leak nur noch mit Passphrase öffnbar).
+- IMAP-Verbindung: Default IMAPS/implizites TLS (Zertifikatsprüfung, TLS ≥ 1.2,
+  kein InsecureSkipVerify — bewusst nicht konfigurierbar). `security = "none"`
+  wird laut gewarnt.
 
 ### 8.2 Robustheit / Wiederaufnahme
 
