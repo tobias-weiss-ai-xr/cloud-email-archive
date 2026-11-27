@@ -185,13 +185,19 @@ Exit-Code != 0 bei Korruption (Index-Dateien werden ignoriert).
   bei MFA-Exchange.
 - Kein Klartext wird dauerhaft auf Platte geschrieben (nur in `extract`-Ausgabe, die
   der Nutzer explizit anfordert).
-- **Bekannte Lücke (lokal, nicht in der Cloud):** `state.json` liegt im Klartext
-  (`~/.config`) und enthält Accounts, Ordnerhierarchie, Nachrichten-zahlen und
-  die UID→Blob-Zuordnung. Begrenzung: wer `~/.config` lesen kann, liest auch
-  `key.txt` — solange der Key nicht passphrasengeschützt liegt, ist die Lücke
-  nicht der schwächste Link. Geplant: Passphrase-Modus + verschlüsseltes State
-  (dann ist die Cloud/Backup-Sicht vollständig metadatenfrei und der lokale
-  Metadaten-Leak nur noch mit Passphrase öffnbar).
+- **State verschlüsselt:** `state.json` liegt age-armored unter demselben
+  Empfänger wie das Archiv und wird atomar geschrieben (verschlüsseln im
+  Speicher, tmp+rename — kein Klartext-Fenster auf der Platte). Bestehende
+  Klartext-States laden weiter (ohne Key) und migrieren beim nächsten Sync
+  automatisch. Mit passphrasengeschütztem Key-File ist damit das komplette
+  Metadaten-Bild verschlüsselt: die Ordnerhierarchie existiert nur im Speicher
+  eines laufenden Kommandos.
+- **Key-File optional passphrasengeschützt** (`keygen -passphrase`): Das
+  Schlüsselmaterial liegt nie im Klartext auf der Platte — nur als age-armor
+  an einen scrypt-Passphrase-Empfänger. Auflösung (lazy, nur bei Armored-Keys):
+  `CEA_PASSPHRASE` → `passphrase_cmd` → verdeckte Terminals-Eingabe (x/term).
+  Bewusst KEIN `-passphrase`-Flag: Kommandozeilen sind in ps/history sichtbar.
+  Klartext-Keyfiles bleiben unverändert gültig.
 - IMAP-Verbindung: Default IMAPS/implizites TLS (Zertifikatsprüfung, TLS ≥ 1.2,
   kein InsecureSkipVerify — bewusst nicht konfigurierbar). `security = "none"`
   wird laut gewarnt.

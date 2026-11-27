@@ -181,7 +181,7 @@ func TestCmdListFolderColumn(t *testing.T) {
 	st := env.state(t)
 	fs := st.Accounts["test"]["INBOX"]
 	fs.Blobs = nil
-	if err := st.save(env.cfg(t).StateFile); err != nil {
+	if err := st.save(env.cfg(t).StateFile, env.arc.id); err != nil {
 		t.Fatal(err)
 	}
 	out = captureStdout(t, func() {

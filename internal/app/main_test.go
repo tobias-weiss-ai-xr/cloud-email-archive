@@ -444,7 +444,7 @@ func TestSyncIndexFailureWarnsNotFails(t *testing.T) {
 		}
 		return age.Encrypt(w, r...)
 	}
-	st, err := loadState(cfg.StateFile)
+	st, err := loadState(cfg.StateFile, env.arc.id)
 	if err != nil {
 		t.Fatal(err)
 	}

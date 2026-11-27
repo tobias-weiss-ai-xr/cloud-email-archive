@@ -87,7 +87,7 @@ func cmdExpire(args []string, log *slog.Logger) error {
 		return fmt.Errorf("no accounts configured (add [[accounts]] sections to %s)", env.cfgPath)
 	}
 
-	st, err := loadState(cfg.StateFile)
+	st, err := loadState(cfg.StateFile, env.arc.id)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func cmdExpire(args []string, log *slog.Logger) error {
 		}
 	}
 	if *doIt {
-		if err := st.save(cfg.StateFile); err != nil {
+		if err := st.save(cfg.StateFile, env.arc.id); err != nil {
 			// join, don't return early — deletions already happened
 			errs = append(errs, fmt.Errorf("save state: %w", err))
 		}

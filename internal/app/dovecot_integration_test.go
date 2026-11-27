@@ -296,7 +296,7 @@ func TestDovecotIntegration(t *testing.T) {
 // state.go; tests only read it through the loader to stay format-agnostic).
 func readStateFor(t *testing.T, path, account, folder string) *FolderState {
 	t.Helper()
-	st, err := loadState(path)
+	st, err := loadState(path, env.arc.id)
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}

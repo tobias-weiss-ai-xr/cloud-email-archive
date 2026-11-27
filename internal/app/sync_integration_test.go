@@ -321,7 +321,7 @@ func TestSyncSecurityNoneWarns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := loadState(cfg.StateFile)
+	st, err := loadState(cfg.StateFile, env.arc.id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,7 @@ func TestSyncUIDValidityReset(t *testing.T) {
 	}
 	// simulate the server having rebuilt the mailbox (new UIDValidity)
 	fs.UIDValidity = good + 1
-	if err := st.save(cfg.StateFile); err != nil {
+	if err := st.save(cfg.StateFile, env.arc.id); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1088,6 +1088,76 @@ func expireFixture(t *testing.T) (*testEnv, *imapmemserver.User, int) {
 	return env, u, port
 }
 
+// The passphrase promise, end to end: armored key file + encrypted state
+// through a real sync/expire/list cycle. On disk after the runs: no secret
+// key bytes, no folder names, no plaintext state JSON.
+func TestSyncPassphraseKeyEncryptedState(t *testing.T) {
+	quietLog()
+	t.Setenv("CEA_PASSPHRASE", "e2e-pass-77")
+	u, port := startMemIMAP(t, "testuser", "testpw")
+	if err := u.Create("Chefkoch/Rezepte", nil); err != nil {
+		t.Fatal(err)
+	}
+	seedMail(t, u, "INBOX", "From: a@x.de\r\nSubject: pub\r\n\r\nbody a\r\n")
+	seedMail(t, u, "Chefkoch/Rezepte", "From: b@x.de\r\nSubject: secret\r\n\r\nbody b\r\n")
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key.txt")
+	captureStdout(t, func() {
+		if err := cmdKeygen([]string{"-output", keyPath, "-passphrase"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	keyRaw, _ := os.ReadFile(keyPath)
+	if !strings.HasPrefix(string(keyRaw), keyArmorMagic) {
+		t.Fatal("key must be armored")
+	}
+	if strings.Contains(string(keyRaw), "AGE-SECRET-KEY") {
+		t.Fatal("armored key must not contain plaintext secret")
+	}
+	env := syncTestEnv(t, port, "test", nil)
+	// swap in the armored key + passphrase_cmd wiring
+	tomlData := fmt.Sprintf("archive_dir = %q\nkey_file = %q\nstate_file = %q\npassphrase_cmd = \"printf 'e2e-pass-77'\"\n\n[[accounts]]\nname = \"test\"\nhost = \"127.0.0.1\"\nport = %d\nsecurity = \"none\"\nuser = \"testuser\"\npassword = \"testpw\"\nfolders = [\"*\"]\n",
+		filepath.Join(dir, "archive"), keyPath, filepath.Join(dir, "state.json"), port)
+	if err := os.WriteFile(env.cfgPath, []byte(tomlData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := runSync(t, env.cfgPath); code != 0 {
+		t.Fatalf("sync exit = %d", code)
+	}
+	// state on disk: armored, no folder metadata in the clear
+	stateRaw, err := os.ReadFile(env.cfg(t).StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(stateRaw), keyArmorMagic) {
+		t.Fatalf("state must be armored after sync, got:\n%.80s", stateRaw)
+	}
+	for _, leak := range []string{"Chefkoch", "Rezepte", "uidvalidity", "INBOX"} {
+		if strings.Contains(string(stateRaw), leak) {
+			t.Fatalf("armored state leaked %q in the clear", leak)
+		}
+	}
+	// expire works over the encrypted state (passphrase_cmd resolution)
+	if code := runExpire(t, env.cfgPath, "-before", "2030-01-01"); code != 0 {
+		t.Fatalf("expire exit = %d", code)
+	}
+	// list still renders the folder column over encrypted state
+	var out string
+	out = captureStdout(t, func() {
+		if err := cmdList([]string{"-config", env.cfgPath}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "Chefkoch/Rezepte") {
+		t.Fatalf("list must decrypt state and show the folder column, got:\n%s", out)
+	}
+	// a second sync re-loads the armored state cleanly (uidvalidity intact)
+	if code := runSync(t, env.cfgPath); code != 0 {
+		t.Fatalf("second sync exit = %d", code)
+	}
+}
+
 func TestSyncBeforeOnlyOldMail(t *testing.T) {
 	quietLog()
 	u, port := startMemIMAP(t, "testuser", "testpw")
@@ -1371,7 +1441,7 @@ func TestExtractUnfiledFallback(t *testing.T) {
 	for k := range fs.Blobs {
 		delete(fs.Blobs, k) // pretend this state predates the bookkeeping
 	}
-	if err := st.save(env.cfg(t).StateFile); err != nil {
+	if err := st.save(env.cfg(t).StateFile, env.arc.id); err != nil {
 		t.Fatal(err)
 	}
 	outDir := filepath.Join(t.TempDir(), "eml")
@@ -1405,7 +1475,7 @@ func TestExtractFolderTraversalRejected(t *testing.T) {
 	}
 	st.Accounts["test"]["../evil"] = &FolderState{UIDValidity: 1, UIDs: []uint32{1}, Blobs: fake}
 	delete(st.Accounts["test"], "INBOX") // only the evil folder knows the blobs
-	if err := st.save(env.cfg(t).StateFile); err != nil {
+	if err := st.save(env.cfg(t).StateFile, env.arc.id); err != nil {
 		t.Fatal(err)
 	}
 	outDir := filepath.Join(t.TempDir(), "eml")

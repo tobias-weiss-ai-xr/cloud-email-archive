@@ -34,7 +34,7 @@ func folderLabel(idx map[string][]string, blobName string) string {
 // unreadable state file must never break a read command — it only costs
 // the folder column.
 func stateIndex(env *cmdEnv) map[string][]string {
-	st, err := loadState(env.cfg.StateFile)
+	st, err := loadState(env.cfg.StateFile, env.arc.id)
 	if err != nil {
 		return nil
 	}

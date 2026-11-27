@@ -185,17 +185,17 @@ subjects, no senders. What a provider (or a stolen backup) can see:
 | Archive dir: `*.age` blobs | mail content | ✅ age (X25519 + ChaCha20-Poly1305) |
 | Archive dir: `.idx-*.age` | full-text index | ✅ age, filename is a hash |
 | Archive dir: blob **filenames** | account name (prefix), SHA-256 = dedup fingerprint, mail count and sizes | ⚠️ metadata, by design (prefix enables account-scoped reads without decrypting) |
-| `~/.config/.../state.json` | accounts, **folder hierarchy**, per-folder message counts, UID→blob mapping | ❌ **plaintext** — see below |
+| `~/.config/.../state.json` | accounts, **folder hierarchy**, per-folder message counts, UID→blob mapping | ✅ age armor (same recipient as the archive); legacy plaintext files migrate to armor on the next save |
 | `~/.config/.../config.toml` | IMAP host/user, optionally `password` (prefer `password_cmd`) | ⚠️ local only |
 
-The plaintext `state.json` is the known gap: folder names were already its keys
-before the folder-tree feature; the UID→blob attribution lives there too. This is
-deliberately local-only (`~/.config`, never inside the synced archive dir), so the
-**cloud/backup view stays clean** — but anyone with access to your user account
-can read it. Note the deeper boundary: whoever can read `~/.config` can also read
-`key.txt`, i.e. the decryption key itself. The metadata gap only becomes *the*
-weakest link once the key is passphrase-protected — planned next (passphrase
-mode + encrypted state).
+`state.json` used to be the known gap: folder names were already its keys before
+the folder-tree feature, and the UID→blob attribution lives there too. It is now
+age-armored to the same recipient as the archive and written atomically — the
+disk never sees plaintext state JSON. Existing plaintext state files keep loading
+(no key needed) and migrate to armor on the next save. Combined with a
+passphrase-protected key file, the complete metadata picture is now encrypted at
+rest: only while a command runs, with the passphrase supplied, does the folder
+hierarchy exist outside the encrypted blobs.
 
 `security = "none"` (unencrypted IMAP) is supported but loudly warned about;
 the default is IMAPS/implicit TLS with certificate verification (no

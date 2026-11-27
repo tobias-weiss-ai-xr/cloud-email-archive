@@ -135,7 +135,7 @@ func (e *testEnv) cfg(t *testing.T) *Config {
 func (e *testEnv) state(t *testing.T) *State {
 	t.Helper()
 	cfg := e.cfg(t)
-	st, err := loadState(cfg.StateFile)
+	st, err := loadState(cfg.StateFile, e.arc.id)
 	if err != nil {
 		t.Fatal(err)
 	}

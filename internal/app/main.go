@@ -160,7 +160,7 @@ func cmdSync(args []string, log *slog.Logger) error {
 		return fmt.Errorf("no accounts configured (add [[accounts]] sections to %s)", env.cfgPath)
 	}
 
-	st, err := loadState(cfg.StateFile)
+	st, err := loadState(cfg.StateFile, arc.id)
 	if err != nil {
 		return err
 	}
@@ -180,7 +180,7 @@ func cmdSync(args []string, log *slog.Logger) error {
 			errs = append(errs, fmt.Errorf("account %s: %w", cfg.Accounts[i].Name, err))
 		}
 	}
-	if err := st.save(cfg.StateFile); err != nil {
+	if err := st.save(cfg.StateFile, arc.id); err != nil {
 		// join, don't return early — account errors must still surface
 		errs = append(errs, fmt.Errorf("save state: %w", err))
 	}

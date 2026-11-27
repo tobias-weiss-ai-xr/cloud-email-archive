@@ -5,11 +5,16 @@ package app
 // no content — safe to leave in ~/.config (never inside the synced archive dir).
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+
+	"filippo.io/age"
+	"filippo.io/age/armor"
 	"strings"
 )
 
@@ -28,7 +33,11 @@ type State struct {
 	Accounts map[string]map[string]*FolderState `json:"accounts"` // account → folder → state
 }
 
-func loadState(path string) (*State, error) {
+// loadState reads the fetch-state bookkeeping. The file may be plaintext
+// (legacy states, test fixtures) or age-armored to the archive's own
+// recipient — armored files need the archive identity, plaintext files load
+// with a nil id. Missing file → fresh empty state (id not consulted).
+func loadState(path string, id *age.X25519Identity) (*State, error) {
 	s := &State{Accounts: map[string]map[string]*FolderState{}}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -37,6 +46,14 @@ func loadState(path string) (*State, error) {
 		}
 		return nil, err
 	}
+	if bytes.HasPrefix(data, []byte(keyArmorMagic)) {
+		if id == nil {
+			return nil, fmt.Errorf("state %s is encrypted but no key was provided", path)
+		}
+		if data, err = decryptWithIdentity(data, id); err != nil {
+			return nil, fmt.Errorf("decrypt state %s: %w", path, err)
+		}
+	}
 	if err := json.Unmarshal(data, s); err != nil {
 		return nil, fmt.Errorf("parse state %s: %w", path, err)
 	}
@@ -44,6 +61,36 @@ func loadState(path string) (*State, error) {
 		s.Accounts = map[string]map[string]*FolderState{}
 	}
 	return s, nil
+}
+
+// decryptWithIdentity unwraps age armor addressed to the archive recipient
+// (X25519, not scrypt — state loads on every command start, no KDF tax).
+func decryptWithIdentity(data []byte, id *age.X25519Identity) ([]byte, error) {
+	r, err := age.Decrypt(armor.NewReader(bytes.NewReader(data)), id)
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(r)
+}
+
+// encryptToIdentity wraps data in age armor for the archive recipient.
+func encryptToIdentity(data []byte, id *age.X25519Identity) ([]byte, error) {
+	out := &bytes.Buffer{}
+	aw := armor.NewWriter(out)
+	w, err := age.Encrypt(aw, id.Recipient())
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	if err := aw.Close(); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // blobFolders inverts the per-folder UID→blob maps: blob name → folders
@@ -98,7 +145,17 @@ func (s *State) folder(account, folder string) *FolderState {
 	return fs
 }
 
-func (s *State) save(path string) error {
+// save persists the state age-encrypted to the archive recipient: the book-
+// keeping file (accounts, folder hierarchy, UID→blob attribution) is exactly
+// the metadata the privacy model refuses to store in the clear. The JSON is
+// encrypted fully in memory, then the armor lands atomically via tmp+rename —
+// no plaintext window on disk, and a crashed run cannot leave a half-written
+// state behind. Legacy plaintext files migrate automatically: they load
+// without a key and the next save writes armored.
+func (s *State) save(path string, id *age.X25519Identity) error {
+	if id == nil {
+		return fmt.Errorf("refusing to write state %s without a key (plaintext state would leak folder metadata)", path)
+	}
 	for _, folders := range s.Accounts {
 		for _, fs := range folders {
 			sort.Slice(fs.UIDs, func(i, j int) bool { return fs.UIDs[i] < fs.UIDs[j] })
@@ -107,6 +164,9 @@ func (s *State) save(path string) error {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err // honest gap: structurally unreachable — fixed-shape struct
+	}
+	if data, err = encryptToIdentity(data, id); err != nil {
+		return fmt.Errorf("encrypt state: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
