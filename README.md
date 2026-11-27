@@ -250,3 +250,10 @@ still passes is reported as SURVIVED and fails the script — that is the
 signal to strengthen the test. Statement coverage alone misses this class:
 the proof-equality gate had 100% statement coverage while its false branch
 was never asserted (found by exactly this campaign).
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE). Copyright 2026 Tobias Weiß.
+Contributions are welcome under the license's inbound=outbound rule
+(no separate contributor agreement); security-relevant findings go to the
+contact in [SECURITY.md](SECURITY.md), not to public issues.
