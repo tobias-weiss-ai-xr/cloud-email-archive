@@ -1,0 +1,47 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security-relevant findings** (anything that lets someone read an
+        encrypted archive, weaken the encryption, or bypass the delete-path
+        guarantees) belong in private mail to weissto@staff.uni-marburg.de,
+        not here — see .github/SECURITY.md.
+        Redact account names and folder names; the folder hierarchy is part
+        of what this tool keeps off other people's disks.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `cloud-email-archive --version`
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and arch, e.g. linux/amd64, windows/arm64
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: IMAP provider and security setting
+      description: e.g. Dovecot 2.3 / security = "implicit"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: The exact command and its full output
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What happened instead
+    validations:
+      required: true
