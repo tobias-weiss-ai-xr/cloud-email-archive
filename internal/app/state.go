@@ -10,11 +10,18 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 type FolderState struct {
 	UIDValidity uint32   `json:"uidvalidity"`
 	UIDs        []uint32 `json:"uids"`
+	// Blobs maps each remembered UID to its archive blob name. Written
+	// during sync, so list/extract can attribute a blob to the folder(s)
+	// it came from — the blob layer itself is content-addressed and does
+	// not know folders. omitempty keeps state files written by older
+	// versions loadable here and vice versa.
+	Blobs map[uint32]string `json:"blobs,omitempty"`
 }
 
 type State struct {
@@ -37,6 +44,39 @@ func loadState(path string) (*State, error) {
 		s.Accounts = map[string]map[string]*FolderState{}
 	}
 	return s, nil
+}
+
+// blobFolders inverts the per-folder UID→blob maps: blob name → folders
+// holding it, sorted (a deduplicated message legitimately lives in several
+// folders). Safe on a nil receiver and on states without Blobs entries —
+// returns an empty map, callers treat unknown blobs as unfiled.
+func (s *State) blobFolders() map[string][]string {
+	out := map[string][]string{}
+	if s == nil {
+		return out
+	}
+	// collect ALL spellings first: deduping on insert would keep whichever
+	// spelling map iteration hits first — non-deterministic. Sort+fold-dedup
+	// after the fact keeps the byte-smallest spelling, always the same.
+	for _, folders := range s.Accounts {
+		for folder, fs := range folders {
+			for _, name := range fs.Blobs {
+				out[name] = append(out[name], folder)
+			}
+		}
+	}
+	for name := range out {
+		l := out[name]
+		sort.Strings(l)
+		deduped := l[:0]
+		for i, f := range l {
+			if i == 0 || !strings.EqualFold(l[i-1], f) {
+				deduped = append(deduped, f)
+			}
+		}
+		out[name] = deduped
+	}
+	return out
 }
 
 func (s *State) account(account string) map[string]*FolderState {

@@ -656,6 +656,7 @@ func searchIndexed(env *cmdEnv, term string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	idx := stateIndex(env)
 	matches := 0
 	for _, name := range cands {
 		account := accountOf(name)
@@ -669,7 +670,7 @@ func searchIndexed(env *cmdEnv, term string) (int, error) {
 		if !strings.Contains(string(searchableText(raw)), term) {
 			continue // trigram false positive
 		}
-		printMsg(account, raw)
+		printMsg(account, folderLabel(idx, name), raw)
 		matches++
 	}
 	return matches, nil

@@ -1282,6 +1282,197 @@ func TestExpireBlobContentMismatchNotProven(t *testing.T) {
 	}
 }
 
+// sync must record which blob each UID came from — the folder attribution
+// that list/extract read back (the blob layer itself is content-addressed
+// and folder-blind).
+func TestSyncRecordsBlobFolders(t *testing.T) {
+	env, _, _ := expireFixture(t)
+	st := env.state(t)
+	fs := st.Accounts["test"]["INBOX"]
+	if len(fs.Blobs) != len(fs.UIDs) {
+		t.Fatalf("blobs map has %d entr(y/ies), UIDs %d", len(fs.Blobs), len(fs.UIDs))
+	}
+	names, err := env.arc.blobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]bool{}
+	for _, b := range names {
+		byName[b.name] = true
+	}
+	for uid, name := range fs.Blobs {
+		if !byName[name] {
+			t.Fatalf("uid %d points at blob %s: not in archive", uid, name)
+		}
+	}
+}
+
+// extract must rebuild the folder tree: INBOX mail under INBOX/, mail from
+// a hierarchical folder under its path — plus the -dedup rule for a message
+// living in two folders.
+func TestExtractFolderTree(t *testing.T) {
+	quietLog()
+	u, port := startMemIMAP(t, "testuser", "testpw")
+	seedMailAt(t, u, "INBOX", "From: in@x.de\r\nSubject: inbox msg\r\n\r\nbody-in\r\n", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local))
+	dup := "From: dup@x.de\r\nSubject: duplicated\r\n\r\nsame bytes\r\n"
+	seedMailAt(t, u, "INBOX", dup, time.Date(2020, 1, 2, 0, 0, 0, 0, time.Local))
+	if err := u.Create("Archive/2023", nil); err != nil {
+		t.Fatal(err)
+	}
+	seedMailAt(t, u, "Archive/2023", "From: old@x.de\r\nSubject: archived\r\n\r\nbody-old\r\n", time.Date(2020, 1, 3, 0, 0, 0, 0, time.Local))
+	seedMailAt(t, u, "Archive/2023", dup, time.Date(2020, 1, 2, 0, 0, 0, 0, time.Local)) // same bytes, second folder
+	env := syncTestEnv(t, port, "test", nil)
+	if code := runSync(t, env.cfgPath); code != 0 {
+		t.Fatalf("sync exit = %d", code)
+	}
+	outDir := filepath.Join(t.TempDir(), "eml")
+	var code int
+	captureStdout(t, func() {
+		code = run([]string{"extract", "-config", env.cfgPath, "-dir", outDir})
+	})
+	if code != 0 {
+		t.Fatalf("extract exit = %d", code)
+	}
+	// the duplicated message: 2 blobs? No — dedup: ONE blob, written to
+	// BOTH folders by default
+	dupHash := strings.TrimSuffix(blobName("test", []byte(dup)), ".age") + ".eml"
+	for _, p := range []string{
+		filepath.Join(outDir, "test", "INBOX", dupHash),
+		filepath.Join(outDir, "test", "Archive", "2023", dupHash),
+		filepath.Join(outDir, "test", "Archive", "2023", strings.TrimSuffix(blobName("test", []byte("From: old@x.de\r\nSubject: archived\r\n\r\nbody-old\r\n")), ".age")+".eml"),
+		filepath.Join(outDir, "test", "INBOX", strings.TrimSuffix(blobName("test", []byte("From: in@x.de\r\nSubject: inbox msg\r\n\r\nbody-in\r\n")), ".age")+".eml"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("extracted file missing: %s (%v)", p, err)
+		}
+	}
+	// -dedup: the duplicated message only in its first sorted folder
+	outDir2 := filepath.Join(t.TempDir(), "eml2")
+	captureStdout(t, func() {
+		code = run([]string{"extract", "-config", env.cfgPath, "-dir", outDir2, "-dedup"})
+	})
+	if code != 0 {
+		t.Fatalf("extract -dedup exit = %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(outDir2, "test", "Archive", "2023", dupHash)); err != nil {
+		t.Fatalf("dedup kept the wrong folder: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir2, "test", "INBOX", dupHash)); !os.IsNotExist(err) {
+		t.Fatal("-dedup must write the duplicated message once (in Archive/2023, sorted first)")
+	}
+}
+
+// a blob the state cannot attribute (predates the bookkeeping) must still
+// extract — flat under the account dir, never lost.
+func TestExtractUnfiledFallback(t *testing.T) {
+	env, _, _ := expireFixture(t)
+	st := env.state(t)
+	fs := st.Accounts["test"]["INBOX"]
+	for k := range fs.Blobs {
+		delete(fs.Blobs, k) // pretend this state predates the bookkeeping
+	}
+	if err := st.save(env.cfg(t).StateFile); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(t.TempDir(), "eml")
+	var code int
+	captureStdout(t, func() {
+		code = run([]string{"extract", "-config", env.cfgPath, "-dir", outDir})
+	})
+	if code != 0 {
+		t.Fatalf("extract exit = %d", code)
+	}
+	entries, err := os.ReadDir(filepath.Join(outDir, "test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("unfiled blobs must extract flat under the account dir: %d entr(y/ies)", len(entries))
+	}
+}
+
+// tampered/corrupted state must never let a server-controlled folder name
+// escape the extract output dir or smuggle filesystem-hostile characters.
+func TestExtractFolderTraversalRejected(t *testing.T) {
+	env, _, _ := expireFixture(t)
+	st := env.state(t)
+	fs := st.Accounts["test"]["INBOX"]
+	// move the whole attribution to a traversal folder: extract must
+	// sanitize, not follow
+	fake := map[uint32]string{}
+	for uid, name := range fs.Blobs {
+		fake[uid] = name
+	}
+	st.Accounts["test"]["../evil"] = &FolderState{UIDValidity: 1, UIDs: []uint32{1}, Blobs: fake}
+	delete(st.Accounts["test"], "INBOX") // only the evil folder knows the blobs
+	if err := st.save(env.cfg(t).StateFile); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(t.TempDir(), "eml")
+	var code int
+	captureStdout(t, func() {
+		code = run([]string{"extract", "-config", env.cfgPath, "-dir", outDir})
+	})
+	if code != 0 {
+		t.Fatalf("extract exit = %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "evil")); !os.IsNotExist(err) {
+		t.Fatal("traversal folder must not escape the output dir")
+	}
+	sane, err := os.Stat(filepath.Join(outDir, "test", "_", "evil"))
+	if err != nil || !sane.IsDir() {
+		t.Fatalf("traversal component must become a literal _ level: %v", err)
+	}
+}
+
+// expire must drop the folder attribution of deleted messages together with
+// their UIDs (a blob kept in the archive, but no longer folder-attributed).
+func TestExpirePrunesBlobFolders(t *testing.T) {
+	env, _, _ := expireFixture(t)
+	st := env.state(t)
+	if fs := st.Accounts["test"]["INBOX"]; len(fs.Blobs) != 3 {
+		t.Fatalf("fixture prestate: %d blob entr(y/ies), want 3", len(fs.Blobs))
+	}
+	if code := runExpire(t, env.cfgPath, "-before", "2025-01-01", "-do"); code != 0 {
+		t.Fatalf("expire -do exit = %d", code)
+	}
+	st2 := env.state(t)
+	fs2 := st2.Accounts["test"]["INBOX"]
+	if len(fs2.Blobs) != len(fs2.UIDs) {
+		t.Fatalf("after expire: %d blob entr(y/ies) for %d UID(s) — attribution must follow deletions", len(fs2.Blobs), len(fs2.UIDs))
+	}
+	if len(fs2.Blobs) != 1 {
+		t.Fatalf("want the fresh message attributed, got %d", len(fs2.Blobs))
+	}
+}
+
+// UIDVALIDITY reset wipes the stale folder attribution with the stale UIDs;
+// the next sync repopulates it.
+func TestSyncUIDValidityResetWipesBlobFolders(t *testing.T) {
+	quietLog()
+	u, port := startMemIMAP(t, "testuser", "testpw")
+	seedMailAt(t, u, "INBOX", "From: old@x.de\r\nSubject: old\r\n\r\nbody\r\n", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local))
+	env := syncTestEnv(t, port, "test", nil)
+	if code := runSync(t, env.cfgPath); code != 0 {
+		t.Fatalf("sync exit = %d", code)
+	}
+	if err := u.Delete("INBOX"); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.Create("INBOX", nil); err != nil {
+		t.Fatal(err)
+	}
+	seedMailAt(t, u, "INBOX", "From: old@x.de\r\nSubject: old\r\n\r\nbody\r\n", time.Date(2020, 1, 1, 0, 0, 0, 0, time.Local))
+	if code := runSync(t, env.cfgPath); code != 0 {
+		t.Fatalf("resync exit = %d", code)
+	}
+	st := env.state(t)
+	fs := st.Accounts["test"]["INBOX"]
+	if len(fs.Blobs) != len(fs.UIDs) {
+		t.Fatalf("after UIDVALIDITY reset: %d blob entr(y/ies) for %d UID(s)", len(fs.Blobs), len(fs.UIDs))
+	}
+}
+
 func TestExpireSkipsUnprovenUID(t *testing.T) {
 	env, u, _ := expireFixture(t)
 	// sabotage: one old message's blob vanishes from the archive — expire

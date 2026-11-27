@@ -13,6 +13,17 @@ set -u
 cd "$(dirname "$0")/.."
 GO=${GO:-go}
 
+# dirty-tree guard: restoration is `git checkout -- <file>`, so ANY uncommitted
+# change in the mutated files would be silently DESTROYED (this has actually
+# eaten a feature branch once — hence the hard stop).
+DIRTY=$(git status --porcelain -- internal/app/expire.go internal/app/sync.go internal/app/main.go internal/app/lock.go)
+if [ -n "$DIRTY" ]; then
+    echo "refusing to run: mutation targets have uncommitted changes" >&2
+    echo "$DIRTY" >&2
+    echo "commit (or stash) first — the script restores targets via git checkout" >&2
+    exit 2
+fi
+
 # toolchain check: the script needs a go that can build THIS module (go.mod
 # go-directive). Falls back to /usr/local/go/bin/go when the system go is too
 # old (common on dev boxes with a distro go alongside the upstream toolchain).

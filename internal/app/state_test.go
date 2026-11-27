@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -178,5 +179,35 @@ func TestSaveStateMkdirError(t *testing.T) {
 	// parent path component is a regular file → MkdirAll must fail
 	if err := s.save(filepath.Join(blocker, "state.json")); err == nil {
 		t.Fatal("save through file-as-parent-directory succeeded")
+	}
+}
+
+// State files written before folder bookkeeping (no "blobs" field) must
+// keep loading — the map simply stays nil until the next sync fills it.
+func TestStateLegacyWithoutBlobs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	legacy := `{"accounts":{"test":{"INBOX":{"uidvalidity":7,"uids":[1,2]}}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := st.Accounts["test"]["INBOX"]
+	if fs.UIDValidity != 7 || len(fs.UIDs) != 2 || fs.Blobs != nil {
+		t.Fatalf("legacy state misparsed: %+v", fs)
+	}
+	if len(st.blobFolders()) != 0 {
+		t.Fatal("legacy state must produce an empty blob index")
+	}
+	// saving must not inject a blobs key for nil maps (stable diff for old versions)
+	if err := st.save(path); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "blobs") {
+		t.Fatalf("nil Blobs must not be serialized, got:\n%s", data)
 	}
 }

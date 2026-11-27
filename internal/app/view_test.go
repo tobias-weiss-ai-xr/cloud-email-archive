@@ -131,6 +131,102 @@ func TestCmdSearchNeedsTerm(t *testing.T) {
 	}
 }
 
+func TestSafeFolder(t *testing.T) {
+	cases := map[string]string{
+		"INBOX":        "INBOX",
+		"Archive/2023": filepath.Join("Archive", "2023"),
+		"":             "", // unfiled sentinel stays empty
+		"..":           "_",
+		"../evil":      filepath.Join("_", "evil"),
+		"a:b":          "a_b",
+		"nul?":         "nul_",
+		"trailing.":    "trailing",
+		"trail space ": "trail space",
+		".hidden":      ".hidden", // dotfiles are legal dirs here
+		"a\x01b":       "a_b",
+		"über/Ärzte":   filepath.Join("über", "Ärzte"), // unicode survives
+	}
+	for in, want := range cases {
+		if got := safeFolder(in); got != want {
+			t.Errorf("safeFolder(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// no component may ever escape the output dir, whatever the input:
+	// no "." or ".." component, never an absolute path
+	for _, evil := range []string{"../../..", "..\\..\\win", "a/../..", "/abs", "C:\\x", "./x"} {
+		got := safeFolder(evil)
+		if filepath.IsAbs(got) {
+			t.Errorf("safeFolder(%q) = %q: absolute", evil, got)
+		}
+		for _, part := range strings.Split(got, string(filepath.Separator)) {
+			if part == "." || part == ".." {
+				t.Errorf("safeFolder(%q) = %q: traversal component", evil, got)
+			}
+		}
+	}
+}
+
+// list shows the folder column from state; unattributed blobs show "-".
+func TestCmdListFolderColumn(t *testing.T) {
+	env, _, _ := expireFixture(t)
+	out := captureStdout(t, func() {
+		if err := cmdList([]string{"-config", env.cfgPath}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, " INBOX ") {
+		t.Fatalf("list must show the folder column, got:\n%s", out)
+	}
+	// drop the attribution → folder shows as "-"
+	st := env.state(t)
+	fs := st.Accounts["test"]["INBOX"]
+	fs.Blobs = nil
+	if err := st.save(env.cfg(t).StateFile); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t, func() {
+		if err := cmdList([]string{"-config", env.cfgPath}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, " - ") {
+		t.Fatalf("unattributed blobs must show \"-\", got:\n%s", out)
+	}
+	// an unreadable state file must not break list — only the column
+	if err := os.WriteFile(env.cfg(t).StateFile, []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t, func() {
+		if err := cmdList([]string{"-config", env.cfgPath}); err != nil {
+			t.Fatalf("unreadable state must degrade, not fail: %v", err)
+		}
+	})
+	if !strings.Contains(out, " - ") {
+		t.Fatalf("broken state must cost only the folder column, got:\n%s", out)
+	}
+}
+
+// a blob attributed to several folders lists both; EqualFold folders
+// (case-differing server names) must not duplicate the entry.
+func TestFolderLabelMultiFolder(t *testing.T) {
+	st := &State{Accounts: map[string]map[string]*FolderState{
+		"test": {
+			"Sent":       &FolderState{Blobs: map[uint32]string{1: "test-abc.age"}},
+			"sent/items": &FolderState{Blobs: map[uint32]string{1: "test-abc.age"}},
+			"SENT":       &FolderState{Blobs: map[uint32]string{1: "test-abc.age"}},
+		},
+	}}
+	idx := st.blobFolders()
+	// "SENT" folds onto "Sent" — one entry, deterministically the
+	// byte-smallest spelling survives map iteration order
+	if got := folderLabel(idx, "test-abc.age"); got != "SENT,sent/items" {
+		t.Fatalf("folderLabel = %q, want \"SENT,sent/items\"", got)
+	}
+	if folderLabel(idx, "gone.age") != "-" {
+		t.Fatal("unknown blob must show -")
+	}
+}
+
 func TestCmdExtract(t *testing.T) {
 	env := newTestEnv(t)
 	names := env.seed(t, "faculty", msgA)

@@ -12,10 +12,33 @@ import (
 	"strings"
 )
 
-// printMsg renders one message line for list/search.
-func printMsg(account string, raw []byte) {
+// printMsg renders one message line for list/search. folder is the first
+// (sorted) folder holding the blob, "-" when the state has no attribution
+// (blob predates folder bookkeeping, or no usable state file).
+func printMsg(account, folder string, raw []byte) {
 	date, from, subject := parseHeaders(raw)
-	fmt.Printf("%-11s %s  %-44s  %s\n", account, date.Format("2006-01-02"), truncate(subject, 44), truncate(from, 30))
+	fmt.Printf("%-11s %-16s %s  %-44s  %s\n", account, truncate(folder, 16), date.Format("2006-01-02"), truncate(subject, 44), truncate(from, 30))
+}
+
+// folderLabel resolves a blob name to its display folder via the state's
+// blob→folder index. Multiple folders show joined; unknown blobs show "-".
+func folderLabel(idx map[string][]string, blobName string) string {
+	fs := idx[blobName]
+	if len(fs) == 0 {
+		return "-"
+	}
+	return strings.Join(fs, ",")
+}
+
+// stateIndex loads the blob→folder index best-effort: a missing or
+// unreadable state file must never break a read command — it only costs
+// the folder column.
+func stateIndex(env *cmdEnv) map[string][]string {
+	st, err := loadState(env.cfg.StateFile)
+	if err != nil {
+		return nil
+	}
+	return st.blobFolders()
 }
 
 func cmdList(args []string) error {
@@ -25,12 +48,13 @@ func cmdList(args []string) error {
 	if err != nil {
 		return err
 	}
+	idx := stateIndex(env)
 	count := 0
 	err = env.arc.walk(env.account, func(r msgRef) error {
 		if *limit > 0 && count >= *limit {
 			return errStop
 		}
-		printMsg(r.account, r.raw)
+		printMsg(r.account, folderLabel(idx, filepath.Base(r.path)), r.raw)
 		count++
 		return nil
 	})
@@ -71,12 +95,13 @@ func cmdSearch(args []string) error {
 	}
 
 	// raw path: exact byte-substring over full decrypted mail, no index
+	idx := stateIndex(env)
 	matches := 0
 	err = env.arc.walk(env.account, func(r msgRef) error {
 		if !strings.Contains(strings.ToLower(string(r.raw)), term) {
 			return nil
 		}
-		printMsg(r.account, r.raw)
+		printMsg(r.account, folderLabel(idx, filepath.Base(r.path)), r.raw)
 		matches++
 		return nil
 	})
@@ -134,6 +159,7 @@ func cmdIndex(args []string) error {
 func cmdExtract(args []string) error {
 	fs := flag.NewFlagSet("extract", flag.ContinueOnError)
 	dir := fs.String("dir", "", "output directory (required)")
+	dedup := fs.Bool("dedup", false, "write each message once even if it lives in several folders")
 	env, err := loadCfgEnv(fs, args)
 	if err != nil {
 		return err
@@ -141,17 +167,33 @@ func cmdExtract(args []string) error {
 	if *dir == "" {
 		return errors.New("extract needs -dir OUT")
 	}
+	// folder attribution comes from state; blobs the state cannot attribute
+	// (predating the bookkeeping) fall back to OUT/<account>/<hash>.eml
+	idx := stateIndex(env)
 	n := 0
 	err = env.arc.walk(env.account, func(r msgRef) error {
-		outDir := filepath.Join(*dir, r.account)
-		if err := os.MkdirAll(outDir, 0o700); err != nil {
-			return err
+		hash := strings.TrimSuffix(filepath.Base(r.path), ".age")
+		folders := idx[filepath.Base(r.path)]
+		if *dedup && len(folders) > 1 {
+			folders = folders[:1] // sorted: deterministic folder choice
 		}
-		out := filepath.Join(outDir, strings.TrimSuffix(filepath.Base(r.path), ".age")+".eml")
-		if err := os.WriteFile(out, r.raw, 0o600); err != nil {
-			return err
+		if len(folders) == 0 {
+			folders = []string{""} // unfiled: directly under the account dir
 		}
-		n++
+		for _, folder := range folders {
+			outDir := filepath.Join(*dir, r.account)
+			if folder != "" { // "" = unfiled sentinel: no folder level
+				outDir = filepath.Join(outDir, safeFolder(folder))
+			}
+			if err := os.MkdirAll(outDir, 0o700); err != nil {
+				return err
+			}
+			out := filepath.Join(outDir, hash+".eml")
+			if err := os.WriteFile(out, r.raw, 0o600); err != nil {
+				return err
+			}
+			n++
+		}
 		return nil
 	})
 	if err != nil {
@@ -159,6 +201,31 @@ func cmdExtract(args []string) error {
 	}
 	fmt.Printf("wrote %d message(s) to %s\n", n, *dir)
 	return nil
+}
+
+// safeFolder turns an IMAP folder name into a portable directory path:
+// one level per "/" component, server-controlled names never escape the
+// output dir and never contain filesystem-hostile characters.
+func safeFolder(folder string) string {
+	parts := strings.Split(folder, "/")
+	for i, p := range parts {
+		p = strings.Map(func(r rune) rune {
+			if r < 0x20 || strings.ContainsRune(`<>:"\|?*`, r) {
+				return '_'
+			}
+			return r
+		}, p)
+		switch p {
+		case ".", "..":
+			p = "_" // traversal components become literal "_"
+		}
+		p = strings.TrimRight(p, ". ") // windows: trailing dots/spaces invalid
+		if len(p) > 200 {
+			p = p[:200] // component length cap; server controls the name
+		}
+		parts[i] = p // "" is fine: filepath.Join skips empty components
+	}
+	return filepath.Join(parts...)
 }
 
 func cmdVerify(args []string) error {

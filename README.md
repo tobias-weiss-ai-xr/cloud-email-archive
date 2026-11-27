@@ -62,7 +62,9 @@ cloud-email-archive list    [-account NAME] [-limit 20]
 cloud-email-archive search  [-account NAME] TERM    # full-text search over decoded mail text
 cloud-email-archive search  [-account NAME] -raw TERM  # exact-byte scan over raw mail bytes
 cloud-email-archive index                           # build/update the search index (sync does this too)
-cloud-email-archive extract [-dir OUT] [-account NAME]   # write decrypted .eml files
+cloud-email-archive extract [-dir OUT] [-dedup] [-account NAME]  # write decrypted .eml files
+                                                              # (rebuilds the IMAP folder tree:
+                                                              #  OUT/<account>/<folder>/<hash>.eml)
 cloud-email-archive expire  [-account NAME] -before YYYY-MM-DD [-do]  # free server space
 cloud-email-archive verify  [-account NAME]         # decrypt + hash-check every blob
 cloud-email-archive keygen  [-output FILE]

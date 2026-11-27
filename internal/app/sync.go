@@ -176,6 +176,7 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 		log.Warn("UIDVALIDITY changed, refetching folder", "account", a.Name, "folder", folder,
 			"old", fs.UIDValidity, "new", sel.UIDValidity)
 		fs.UIDs = nil
+		fs.Blobs = nil
 	}
 	fs.UIDValidity = sel.UIDValidity
 
@@ -221,6 +222,11 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 			}
 		}
 		fs.UIDs = keep
+		for uid := range fs.Blobs {
+			if !presentSet[uid] {
+				delete(fs.Blobs, uid) // expunged elsewhere: attribution gone
+			}
+		}
 	}
 	if len(todo) == 0 {
 		log.Debug("up to date", "account", a.Name, "folder", folder, "count", len(present))
@@ -228,11 +234,19 @@ func syncFolder(c *imapclient.Client, a *Account, folder string, arc *Archive, s
 	}
 	log.Info("fetching new", "account", a.Name, "folder", folder, "new", len(todo), "total", len(present))
 
-	fetched, s, err := fetchAndArchive(c, a, folder, arc, todo, log)
+	fetched, newBlobs, s, err := fetchAndArchive(c, a, folder, arc, todo, log)
 	if err != nil {
 		return s, err
 	}
 	fs.UIDs = append(fs.UIDs, fetched...)
+	if len(newBlobs) > 0 {
+		if fs.Blobs == nil {
+			fs.Blobs = make(map[uint32]string, len(newBlobs))
+		}
+		for uid, name := range newBlobs {
+			fs.Blobs[uid] = name
+		}
+	}
 	return s, nil
 }
 
@@ -288,9 +302,11 @@ func enumerateUIDs(c *imapclient.Client, numMessages uint32) ([]imap.UID, error)
 }
 
 // fetchAndArchive streams BODY[] for the given UIDs and stores new messages.
+// Returns the remembered UIDs and the UID→blob-name map (the blob layer is
+// content-addressed; the folder attribution lives in state, not in blobs).
 // Returned stats count only newly written blobs; dedup hits fetch the bytes
 // but add nothing.
-func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archive, todo []imap.UID, log *slog.Logger) ([]uint32, syncStats, error) {
+func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archive, todo []imap.UID, log *slog.Logger) ([]uint32, map[uint32]string, syncStats, error) {
 	uidSet := imap.UIDSetNum(todo...)
 	cmd := c.Fetch(uidSet, &imap.FetchOptions{
 		UID:         true,
@@ -299,6 +315,7 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 	defer cmd.Close()
 
 	var fetched []uint32
+	newBlobs := make(map[uint32]string)
 	var s syncStats
 	var totalAdd int64
 	for {
@@ -327,7 +344,7 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 						err = fmt.Errorf("body truncated: got %d of %d bytes", len(b), item.Literal.Size())
 					}
 					if err != nil {
-						return fetched, s, err
+						return fetched, newBlobs, s, err
 					}
 					body = b
 				}
@@ -347,8 +364,9 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 		totalAdd += int64(len(body))
 		written, err := arc.put(a.Name, body)
 		if err != nil {
-			return fetched, s, err
+			return fetched, newBlobs, s, err
 		}
+		newBlobs[uint32(uid)] = blobName(a.Name, body)
 		if written {
 			s.messages++
 			s.bytes += int64(len(body))
@@ -356,11 +374,11 @@ func fetchAndArchive(c *imapclient.Client, a *Account, folder string, arc *Archi
 		fetched = append(fetched, uint32(uid))
 	}
 	if err := cmd.Close(); err != nil {
-		return fetched, s, err
+		return fetched, newBlobs, s, err
 	}
 	log.Info("stored", "account", a.Name, "folder", folder, "new_messages", s.messages,
 		"new_bytes", bytesCount(s.bytes), "raw_bytes", bytesCount(totalAdd), "uids_remembered", len(fetched))
-	return fetched, s, nil
+	return fetched, newBlobs, s, nil
 }
 
 func bytesCount(n int64) string {

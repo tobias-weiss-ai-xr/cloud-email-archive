@@ -96,7 +96,8 @@ ArchiveDir (`archive_dir`) sowie Schreibzugriff auf `state_file`/`key_file` in
 - **Content-Addressing:** Dateiname = `<account>_<sha256(raw)>.age`. Ergibt
   Deduplikation (identische Mails → gleicher Name → Skip) und macht den Sync
   **inkrementell von Natur aus**, ohne eine separate Snapshot/Dedup-Datenbank.
-- **State:** `state.json` mit (Account, Ordner, UIDVALIDITY, [UIDs]). Plaintext-UIDs
+- **State:** `state.json` mit (Account, Ordner, UIDVALIDITY, [UIDs], UID→Blobname). Plaintext-UIDs
+  plus Ordner-Zuordnung
   sind kein Geheimnis; der Sync merkt sich nur, *was schon da ist*.
 - **Append-only:** Löschung ist kein Anwendungsfall; Archiv bleibt vollständig.
 - **Verifikation:** da age authentisiert ist, ist `verify` (alles entschlüsseln)
@@ -114,7 +115,7 @@ cloud-email-archive
     ├── main.go              CLI-Dispatch (keygen|sync|index|list|search|extract|verify)
     ├── config.go            TOML-Config, Defaults, Konto-Auflösung
     ├── archive.go           Age-Layer: Blobname (SHA-256), put/get/walk, Header-Parsing
-    ├── state.go             state.json Laden/Speichern (UIDVALIDITY/UIDs)
+    ├── state.go             state.json Laden/Speichern (UIDVALIDITY/UIDs, UID→Blob → Ordner)
     ├── sync.go              IMAP-Sync: login/select/enumerate/fetch/encrypt (+ Index-Pflege)
     ├── view.go              list/search/extract/verify (lesend, offline)
     ├── index.go             Verschlüsselter Trigram-Index (.idx-<sha256>.age-Segmente,

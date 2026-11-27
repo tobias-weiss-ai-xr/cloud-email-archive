@@ -244,6 +244,11 @@ func expireFolder(c *imapclient.Client, a *Account, folder string, arc *Archive,
 		}
 	}
 	fs.UIDs = keep
+	for uid := range fs.Blobs {
+		if provedSet[uid] {
+			delete(fs.Blobs, uid) // deleted from the server: folder attribution ends
+		}
+	}
 	fmt.Printf("deleted: %s/%s: deleted %d of %d in-scope message(s) (%s)\n",
 		a.Name, folder, len(proved), len(cands), bytesCount(bytes))
 	log.Info("expired", "account", a.Name, "folder", folder, "deleted", len(proved),
