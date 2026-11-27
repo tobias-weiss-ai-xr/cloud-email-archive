@@ -86,7 +86,7 @@ func newTestEnvWithConfig(t *testing.T, body string) *testEnv {
 	cfgPath := filepath.Join(dir, "config.toml")
 
 	captureStdout(t, func() {
-		if err := writeNewKey(keyPath); err != nil {
+		if err := writeNewKey(keyPath, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -97,7 +97,7 @@ func newTestEnvWithConfig(t *testing.T, body string) *testEnv {
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	id, err := loadKey(keyPath)
+	id, err := loadKey(keyPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}

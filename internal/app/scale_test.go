@@ -145,10 +145,10 @@ func TestScaleCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 	keyPath := filepath.Join(dir, "key.txt")
-	if err := writeNewKey(keyPath); err != nil {
+	if err := writeNewKey(keyPath, ""); err != nil {
 		t.Fatal(err)
 	}
-	id, err := loadKey(keyPath)
+	id, err := loadKey(keyPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}

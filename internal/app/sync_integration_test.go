@@ -83,7 +83,7 @@ func syncTestEnv(t *testing.T, port int, accountName string, folders []string) *
 	cfgPath := filepath.Join(dir, "config.toml")
 
 	captureStdout(t, func() {
-		if err := writeNewKey(keyPath); err != nil {
+		if err := writeNewKey(keyPath, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -111,7 +111,7 @@ password = "testpw"
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	id, err := loadKey(keyPath)
+	id, err := loadKey(keyPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestCmdSyncFailedAccountNonZeroExit(t *testing.T) {
 	keyPath := filepath.Join(dir, "key.txt")
 	cfgPath := filepath.Join(dir, "config.toml")
 	captureStdout(t, func() {
-		if err := writeNewKey(keyPath); err != nil {
+		if err := writeNewKey(keyPath, ""); err != nil {
 			t.Fatal(err)
 		}
 	})

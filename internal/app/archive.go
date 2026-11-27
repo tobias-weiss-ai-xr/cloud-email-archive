@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"filippo.io/age/armor"
 )
 
 type Archive struct {
@@ -32,9 +33,15 @@ type Archive struct {
 	newWriter func(io.Writer, ...age.Recipient) (io.WriteCloser, error)
 }
 
+// keyArmorMagic marks a passphrase-encrypted keyfile (age armor). Plaintext
+// keyfiles (age-keygen format) never start with this — safe discriminator.
+const keyArmorMagic = "-----BEGIN AGE ENCRYPTED FILE-----"
+
 // writeNewKey generates a fresh age identity and stores it at keyFile (0700 dir,
-// 0600 file). Prints the recipient (public) part for reference.
-func writeNewKey(keyFile string) error {
+// 0600 file). Prints the recipient (public) part for reference. With passphrase
+// set (non-empty), the keyfile itself is age-encrypted to that passphrase
+// (scrypt): the disk never holds the secret key in the clear.
+func writeNewKey(keyFile, passphrase string) error {
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		return err // only fails on crypto/rand exhaustion — not injectable
@@ -42,20 +49,90 @@ func writeNewKey(keyFile string) error {
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(keyFile, []byte(id.String()+"\n"), 0o600); err != nil {
+	var blob []byte
+	if passphrase == "" {
+		blob = []byte(id.String() + "\n")
+	} else {
+		if blob, err = encryptWithPassphrase([]byte(id.String()+"\n"), passphrase); err != nil {
+			return err
+		}
+	}
+	if err := os.WriteFile(keyFile, blob, 0o600); err != nil {
 		return err
 	}
 	fmt.Printf("wrote key to %s\n", keyFile)
+	if passphrase != "" {
+		fmt.Println("key file is encrypted with your passphrase.")
+	}
 	fmt.Printf("recipient (public): %s\n", id.Recipient())
 	fmt.Println("KEEP THIS KEY SAFE — it is the only way to decrypt the archive.")
 	return nil
 }
 
-// loadKey reads the age secret key from keyFile.
-func loadKey(keyFile string) (*age.X25519Identity, error) {
+// encryptWithPassphrase wraps data in age armor under a scrypt passphrase
+// recipient. Used for passphrase-protected keyfiles (and encrypted state).
+func encryptWithPassphrase(data []byte, passphrase string) ([]byte, error) {
+	out := &bytes.Buffer{}
+	aw := armor.NewWriter(out)
+	rec, err := age.NewScryptRecipient(passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("passphrase recipient: %w (empty passphrase?)", err)
+	}
+	w, err := age.Encrypt(aw, rec)
+	if err != nil {
+		return nil, fmt.Errorf("passphrase encryption: %w", err)
+	}
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	if err := aw.Close(); err != nil { // armor trailer lands only on THIS close
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+// decryptWithPassphrase unwraps age-armored scrypt data.
+func decryptWithPassphrase(data []byte, passphrase string) ([]byte, error) {
+	id, err := age.NewScryptIdentity(passphrase)
+	if err != nil {
+		return nil, err
+	}
+	r, err := age.Decrypt(armor.NewReader(bytes.NewReader(data)), id)
+	if err != nil {
+		return nil, err // wrong passphrase surfaces as "no identity matched"
+	}
+	return io.ReadAll(r)
+}
+
+// keyFileIsArmored reports whether keyFile holds a passphrase-encrypted
+// key. Any read error returns false — loadKey then produces the canonical
+// "read key" error itself.
+func keyFileIsArmored(keyFile string) bool {
+	data, err := os.ReadFile(keyFile)
+	if err != nil {
+		return false
+	}
+	return bytes.HasPrefix(data, []byte(keyArmorMagic))
+}
+
+// loadKey reads the age secret key from keyFile. Passphrase-protected
+// keyfiles (armor) are decrypted with the given passphrase; plaintext
+// keyfiles (age-keygen format) load without one.
+func loadKey(keyFile, passphrase string) (*age.X25519Identity, error) {
 	data, err := os.ReadFile(keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read key %s: %w (run `cloud-email-archive keygen` first)", keyFile, err)
+	}
+	if bytes.HasPrefix(data, []byte(keyArmorMagic)) {
+		if passphrase == "" {
+			return nil, fmt.Errorf("key %s is passphrase-protected but no passphrase was provided (set passphrase_cmd, CEA_PASSPHRASE, or use keygen -passphrase)", keyFile)
+		}
+		if data, err = decryptWithPassphrase(data, passphrase); err != nil {
+			return nil, fmt.Errorf("open key %s: %w (wrong passphrase?)", keyFile, err)
+		}
 	}
 	id, err := age.ParseX25519Identity(strings.TrimSpace(string(data)))
 	if err != nil {

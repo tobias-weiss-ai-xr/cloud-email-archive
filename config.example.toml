@@ -39,3 +39,7 @@ security = "implicit"
 user = "you@work.example.edu"
 password = "change-me"                  # app password, if MFA is enabled
 # folders = ["INBOX", "Gesendete Elemente"]
+
+# Passphrase for a passphrase-protected key file (`keygen -passphrase`).
+# Same pattern as password_cmd; ignored for plaintext key files.
+# passphrase_cmd = "cat ~/.config/cea-key-passphrase"

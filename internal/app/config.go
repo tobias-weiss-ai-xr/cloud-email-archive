@@ -14,10 +14,14 @@ import (
 )
 
 type Config struct {
-	ArchiveDir string    `toml:"archive_dir"`
-	KeyFile    string    `toml:"key_file"`
-	StateFile  string    `toml:"state_file"`
-	Accounts   []Account `toml:"accounts"`
+	ArchiveDir string `toml:"archive_dir"`
+	KeyFile    string `toml:"key_file"`
+	StateFile  string `toml:"state_file"`
+	// PassphraseCmd resolves the passphrase for a passphrase-protected key
+	// file (keygen -passphrase); mirroring the IMAP password_cmd pattern.
+	// Only consulted when the key file is armored — plaintext keys ignore it.
+	PassphraseCmd string    `toml:"passphrase_cmd"`
+	Accounts      []Account `toml:"accounts"`
 }
 
 type Account struct {

@@ -411,7 +411,7 @@ func TestLoadCfgEnvEnvVar(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeNewKey(filepath.Join(dir, "key.txt")); err != nil {
+	if err := writeNewKey(filepath.Join(dir, "key.txt"), ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CLOUD_EMAIL_ARCHIVE_CONFIG", cfgPath)

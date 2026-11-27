@@ -20,12 +20,12 @@ func testID(t *testing.T) *age.X25519Identity {
 	var id *age.X25519Identity
 	var err error
 	captureStdout(t, func() {
-		err = writeNewKey(keyFile)
+		err = writeNewKey(keyFile, "")
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err = loadKey(keyFile)
+	id, err = loadKey(keyFile, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestKeyPermissions(t *testing.T) {
 	needPosixPerms(t)
 	keyFile := filepath.Join(t.TempDir(), "k.txt")
 	captureStdout(t, func() {
-		if err := writeNewKey(keyFile); err != nil {
+		if err := writeNewKey(keyFile, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -383,11 +383,109 @@ func TestKeyPermissions(t *testing.T) {
 	}
 }
 
+// Passphrase-protected keyfiles: writeNewKey(keyFile, pass) writes age
+// armor (disk never holds the secret key), loadKey decrypts it back to the
+// same identity; a wrong passphrase fails cleanly, and plaintext keyfiles
+// keep loading without any passphrase.
+func TestKeyPassphraseRoundTrip(t *testing.T) {
+	quietLog()
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "key.txt")
+	if err := writeNewKey(keyFile, "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(raw), keyArmorMagic) {
+		t.Fatalf("passphrase keyfile must be armored, got: %q", raw[:40])
+	}
+	if strings.Contains(string(raw), "AGE-SECRET-KEY") {
+		t.Fatal("armored keyfile must not contain the secret key in the clear")
+	}
+	id, err := loadKey(keyFile, "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := loadKey(keyFile, "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Recipient().String() != id2.Recipient().String() {
+		t.Fatal("decrypted identities must match")
+	}
+	// wrong passphrase: clean error, no identity leak
+	if _, err := loadKey(keyFile, "wrong"); err == nil {
+		t.Fatal("wrong passphrase must fail")
+	} else if !strings.Contains(err.Error(), "open key") {
+		t.Errorf("wrong-passphrase error should be scoped to opening the key, got: %v", err)
+	}
+	// no passphrase provided: explicit error (not a prompt hang)
+	if _, err := loadKey(keyFile, ""); err == nil {
+		t.Fatal("missing passphrase must fail")
+	} else if !strings.Contains(err.Error(), "passphrase-protected") {
+		t.Errorf("missing-passphrase error should explain the situation, got: %v", err)
+	}
+	// plaintext keyfile still loads with empty passphrase
+	plain := filepath.Join(dir, "plain.txt")
+	if err := writeNewKey(plain, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadKey(plain, ""); err != nil {
+		t.Fatalf("plaintext keyfile with empty passphrase must load: %v", err)
+	}
+}
+
+// keygen -passphrase resolves via CEA_PASSPHRASE (non-interactive) and the
+// resulting keyfile loads through openArchive's resolution chain.
+func TestCmdKeygenPassphraseEnv(t *testing.T) {
+	quietLog()
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "key.txt")
+	t.Setenv("CEA_PASSPHRASE", "env-pass-42")
+	if err := cmdKeygen([]string{"-output", keyFile, "-passphrase"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(keyFile)
+	if !strings.HasPrefix(string(raw), keyArmorMagic) {
+		t.Fatal("keygen -passphrase must produce an armored keyfile")
+	}
+	cfg := &Config{ArchiveDir: filepath.Join(dir, "arc"), KeyFile: keyFile}
+	if _, err := openArchive(cfg); err != nil { // resolvePassphrase reads CEA_PASSPHRASE
+		t.Fatalf("openArchive must resolve the env passphrase: %v", err)
+	}
+	// wrong env passphrase must fail
+	if _, err := loadKey(keyFile, "nope"); err == nil {
+		t.Fatal("wrong env passphrase must fail")
+	}
+}
+
+// passphrase_cmd in the config mirrors the IMAP password_cmd pattern.
+func TestResolvePassphraseCmd(t *testing.T) {
+	t.Setenv("CEA_PASSPHRASE", "") // isolate from ambient env
+	cfg := &Config{PassphraseCmd: "printf 'cmd-pass\nextra'"}
+	got, err := resolvePassphrase(cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "cmd-pass\nextra" {
+		t.Fatalf("resolvePassphrase = %q", got)
+	}
+	// failing command is a wrapped error, never a fallback to prompt
+	cfg.PassphraseCmd = "exit 3"
+	if _, err := resolvePassphrase(cfg, false); err == nil {
+		t.Fatal("failing passphrase_cmd must fail")
+	} else if !strings.Contains(err.Error(), "passphrase_cmd failed") {
+		t.Errorf("error should name passphrase_cmd, got: %v", err)
+	}
+}
+
 func TestLoadKeyErrors(t *testing.T) {
 	dir := t.TempDir()
 
 	// missing file
-	if _, err := loadKey(filepath.Join(dir, "gone.txt")); err == nil {
+	if _, err := loadKey(filepath.Join(dir, "gone.txt"), ""); err == nil {
 		t.Error("missing key file must fail")
 	} else if !strings.Contains(err.Error(), "keygen") {
 		t.Errorf("error should hint at keygen, got: %v", err)
@@ -396,7 +494,7 @@ func TestLoadKeyErrors(t *testing.T) {
 	// garbage content
 	bad := filepath.Join(dir, "bad.txt")
 	os.WriteFile(bad, []byte("not a key\n"), 0o600)
-	if _, err := loadKey(bad); err == nil {
+	if _, err := loadKey(bad, ""); err == nil {
 		t.Error("garbage key must fail")
 	}
 }
@@ -405,21 +503,21 @@ func TestWriteNewKeyOverwrite(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "k.txt")
 	var rec1, rec2 *age.X25519Recipient
 	captureStdout(t, func() {
-		if err := writeNewKey(keyFile); err != nil {
+		if err := writeNewKey(keyFile, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
-	id1, err := loadKey(keyFile)
+	id1, err := loadKey(keyFile, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	rec1 = id1.Recipient()
 	captureStdout(t, func() {
-		if err := writeNewKey(keyFile); err != nil {
+		if err := writeNewKey(keyFile, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
-	id2, err := loadKey(keyFile)
+	id2, err := loadKey(keyFile, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +672,7 @@ func TestWriteNewKeyTargetIsDir(t *testing.T) {
 	}
 	var out string
 	out = captureStdout(t, func() {
-		if err := writeNewKey(target); err == nil {
+		if err := writeNewKey(target, ""); err == nil {
 			t.Error("want error writing key onto a directory")
 		}
 	})
@@ -665,7 +763,7 @@ func TestWriteNewKeyMkdirError(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeNewKey(filepath.Join(blocker, "key.txt")); err == nil {
+	if err := writeNewKey(filepath.Join(blocker, "key.txt"), ""); err == nil {
 		t.Fatal("writeNewKey through file-as-parent succeeded")
 	}
 }

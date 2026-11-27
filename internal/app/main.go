@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/term"
 	"time"
 )
 
@@ -193,13 +196,64 @@ func cmdSync(args []string, log *slog.Logger) error {
 func cmdKeygen(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	out := fs.String("output", "", "key file (default ~/.config/cloud-email-archive/key.txt)")
+	passphrase := fs.Bool("passphrase", false, "encrypt the key file with a passphrase (disk never holds the secret key in the clear)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *out == "" {
 		*out = defaultKeyPath()
 	}
-	return writeNewKey(*out)
+	var pass string
+	if *passphrase {
+		var err error
+		if pass, err = resolvePassphrase(nil, true); err != nil {
+			return err
+		}
+		if pass == "" {
+			return errors.New("no passphrase provided (CEA_PASSPHRASE or interactive prompt)")
+		}
+	}
+	return writeNewKey(*out, pass)
+}
+
+// resolvePassphrase returns the key passphrase from the environment
+// (CEA_PASSPHRASE), the config (passphrase_cmd), or — interactive — from a
+// hidden terminal prompt (askConfirm: prompt twice on keygen). No passphrase
+// flag exists on purpose: command-line arguments are visible in ps/history.
+// cfg may be nil (keygen has no config yet).
+func resolvePassphrase(cfg *Config, askConfirm bool) (string, error) {
+	if p := os.Getenv("CEA_PASSPHRASE"); p != "" {
+		return p, nil
+	}
+	if cfg != nil && cfg.PassphraseCmd != "" {
+		out, err := exec.Command("sh", "-c", cfg.PassphraseCmd).Output()
+		if err != nil {
+			return "", fmt.Errorf("passphrase_cmd failed: %w", err)
+		}
+		return strings.TrimRight(string(out), "\r\n"), nil
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return "", fmt.Errorf("passphrase required but stdin is not a terminal (set CEA_PASSPHRASE or passphrase_cmd)")
+	}
+	fmt.Fprint(os.Stderr, "Enter passphrase: ")
+	p1, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", err
+	}
+	if !askConfirm {
+		return string(p1), nil
+	}
+	fmt.Fprint(os.Stderr, "Confirm passphrase: ")
+	p2, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", err
+	}
+	if string(p1) != string(p2) {
+		return "", errors.New("passphrases do not match")
+	}
+	return string(p1), nil
 }
 
 func getenvDefault(key, def string) string {
@@ -230,7 +284,16 @@ func userCfgDir() string {
 }
 
 func openArchive(cfg *Config) (*Archive, error) {
-	id, err := loadKey(cfg.KeyFile)
+	// resolve the passphrase lazily: plaintext key files need none, and an
+	// unnecessary non-interactive error would break scripted plaintext runs
+	pass := ""
+	if keyFileIsArmored(cfg.KeyFile) {
+		var err error
+		if pass, err = resolvePassphrase(cfg, false); err != nil {
+			return nil, err
+		}
+	}
+	id, err := loadKey(cfg.KeyFile, pass)
 	if err != nil {
 		return nil, err
 	}

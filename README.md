@@ -39,6 +39,14 @@ GitHub Releases for every `v*` tag.
 
 ## Setup (once)
 
+Passphrase-protected key (recommended: the disk never holds the secret key in
+the clear — every run asks for it, or reads it via `passphrase_cmd` /
+`CEA_PASSPHRASE`):
+
+```
+cloud-email-archive keygen -passphrase
+```
+
 ```sh
 cp config.example.toml ~/.config/cloud-email-archive/config.toml
 # Fill in your accounts (as many as you like). Password alternatives:
