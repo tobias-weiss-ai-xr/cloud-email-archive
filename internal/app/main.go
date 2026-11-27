@@ -19,7 +19,7 @@ import (
 
 // version is the single source for the `version` command; CI/release builds
 // can stamp it with -ldflags "-X github.com/tobias-weiss-ai-xr/cloud-email-archive/internal/app.version=...".
-var version = "0.1.0"
+var version = "dev"
 
 const usageText = `cloud-email-archive — encrypted email archive synced to a cloud folder
 
